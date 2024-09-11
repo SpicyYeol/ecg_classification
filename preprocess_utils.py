@@ -72,14 +72,14 @@ def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True):
         preprocessed_data = []
         for signal in tqdm(dataset, desc="Preprocessing"):
             if isinstance(signal, dict):
-                signal['ecg'] = preprocessing(signal['ecg'],fs=fs, plot=plot)
-                signal['ecg'] = generate_quality_map(signal['ecg'],start_idx=0,end_idx=1000,fs=fs,plot=plot)
+                signal['data'] = preprocessing(signal['data'],fs=fs, plot=plot)
+                signal['data'] = generate_quality_map(signal['data'],start_idx=0,end_idx=1000,fs=114,plot=plot)
             else:
                 signal = preprocessing(signal,fs=fs,plot=plot)
                 signal = generate_quality_map(signal,start_idx=0,end_idx=None,fs=fs,plot=plot)
 
             if dtype == 2:
-                signal['ecg'] = convert_to_image(signal['ecg'],int(np.ceil(np.sqrt(signal['ecg'].shape[0]))))
+                signal['data'] = convert_to_image(signal['data'],int(np.ceil(np.sqrt(signal['data'].shape[0]))))
             preprocessed_data.append(signal)
             cnt +=1
             if cnt ==5:
