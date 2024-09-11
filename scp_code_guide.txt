@@ -1,0 +1,71 @@
+1AVB (First-degree atrioventricular block): 1도 방실차단
+2AVB (Second-degree atrioventricular block): 2도 방실차단
+3AVB (Third-degree atrioventricular block): 3도 방실차단
+ABQRS (Aberrant QRS complex): 비정상 QRS 복합파
+AFIB (Atrial fibrillation): 심방세동
+AFLT (Atrial flutter): 심방조동
+ALMI (Anterolateral myocardial infarction): 전외측 심근경색
+AMI (Acute myocardial infarction): 급성 심근경색
+ANEUR (Ventricular aneurysm): 심실동맥류
+ASMI (Anteroseptal myocardial infarction): 전중격 심근경색
+BIGU (Bigeminy): 2연속심박
+CLBBB (Complete left bundle branch block): 완전 좌각차단
+CRBBB (Complete right bundle branch block): 완전 우각차단
+DIG (Digitalis effect): 디기탈리스 효과
+EL (Electrolyte imbalance): 전해질 불균형
+HVOLT (High voltage QRS): 고전압 QRS
+ILBBB (Incomplete left bundle branch block): 불완전 좌각차단
+ILMI (Inferolateral myocardial infarction): 하외측 심근경색
+IMI (Inferior myocardial infarction): 하벽 심근경색
+INJAL (Anterolateral injury): 전외측 손상
+INJAS (Anteroseptal injury): 전중격 손상
+INJIL (Inferolateral injury): 하외측 손상
+INJIN (Inferior injury): 하벽 손상
+INJLA (Lateral injury): 측벽 손상
+INVT (Intraventricular conduction delay): 심실내 전도 지연
+IPLMI (Inferoposterior myocardial infarction): 하후벽 심근경색
+IPMI (Inferior-posterior myocardial infarction): 하후벽 심근경색
+IRBBB (Incomplete right bundle branch block): 불완전 우각차단
+ISCAL (Anterolateral ischemia): 전외측 허혈
+ISCAN (Anteroseptal ischemia): 전중격 허혈
+ISCAS (Anteroseptal ischemia): 전중격 허혈 (중복 코드)
+ISCIL (Inferolateral ischemia): 하외측 허혈
+ISCIN (Inferior ischemia): 하벽 허혈
+ISCLA (Lateral ischemia): 측벽 허혈
+ISC_ (Ischemia unspecified): 비특정 허혈
+IVCD (Intraventricular conduction delay): 심실내 전도 지연
+LAFB (Left anterior fascicular block): 좌전도 차단
+LAO/LAE (Left atrial overload/left atrial enlargement): 좌심방 과부하/좌심방 비대
+LMI (Lateral myocardial infarction): 측벽 심근경색
+LNGQT (Long QT interval): 긴 QT 간격
+LOWT (Low voltage QRS): 저전압 QRS
+LPFB (Left posterior fascicular block): 좌후방 차단
+LPR (Low voltage P wave): 저전압 P파
+LVH (Left ventricular hypertrophy): 좌심실 비대
+LVOLT (Left ventricular overload): 좌심실 과부하
+NDT (Non-diagnostic T wave): 비진단적 T파
+NORM (Normal ECG): 정상 심전도
+NST_ (Non-specific ST changes): 비특이적 ST 변화
+NT_ (Non-specific T changes): 비특이적 T 변화
+PAC (Premature atrial contraction): 조기 심방 수축
+PACE (Pacemaker rhythm): 인공심박동기 리듬
+PMI (Posterior myocardial infarction): 후벽 심근경색
+PRC(S) (Pre-excitation syndrome): 조기 흥분 증후군
+PSVT (Paroxysmal supraventricular tachycardia): 발작성 상심실 빈맥
+PVC (Premature ventricular contraction): 조기 심실 수축
+QWAVE (Q wave abnormality): Q파 이상
+RAO/RAE (Right atrial overload/right atrial enlargement): 우심방 과부하/우심방 비대
+RVH (Right ventricular hypertrophy): 우심실 비대
+SARRH (Sinus arrhythmia): 동성 부정맥
+SBRAD (Sinus bradycardia): 동성 서맥
+SEHYP (Secondary hypertension): 이차성 고혈압
+SR (Sinus rhythm): 동성 리듬
+STACH (Sinus tachycardia): 동성 빈맥
+STD_ (ST depression): ST 하강
+STE_ (ST elevation): ST 상승
+SVARR (Supraventricular arrhythmia): 상심실성 부정맥
+SVTAC (Supraventricular tachycardia): 상심실성 빈맥
+TAB_ (Tabular data): 표형 데이터
+TRIGU (Trigeminy): 3연속 심박
+VCLVH (Ventricular hypertrophy with large voltage QRS): 고전압 QRS를 동반한 심실 비대
+WPW (Wolff-Parkinson-White syndrome): 울프-파킨슨-화이트 증후군

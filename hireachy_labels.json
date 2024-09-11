@@ -1,0 +1,85 @@
+{
+    "Heart Blocks": {
+        "1AVB": 0,
+        "2AVB": 1,
+        "3AVB": 2,
+        "CLBBB": 11,
+        "CRBBB": 12,
+        "ILBBB": 16,
+        "IRBBB": 27,
+        "LAFB": 36,
+        "LPFB": 41,
+        "IVCD": 35
+    },
+    "Arrhythmias": {
+        "AFIB": 4,
+        "AFLT": 5,
+        "PSVT": 53,
+        "SVTAC": 66,
+        "PVC": 54,
+        "PAC": 49,
+        "SARRH": 58
+    },
+    "Myocardial Infarction and Ischemia": {
+        "ALMI": 6,
+        "ASMI": 9,
+        "IMI": 18,
+        "IPLMI": 25,
+        "ILMI": 17,
+        "PMI": 51,
+        "INJAL": 19,
+        "INJAS": 20,
+        "INJIL": 21,
+        "INJIN": 22,
+        "INJLA": 23,
+        "ISCAL": 28,
+        "ISCAN": 29,
+        "ISCAS": 30,
+        "ISCIL": 31,
+        "ISCIN": 32,
+        "ISCLA": 33,
+        "ISC_": 34,
+        "QWAVE": 55
+    },
+    "Heart Failure and Cardiomyopathy": {
+        "LVH": 43,
+        "RVH": 57,
+        "VCLVH": 69
+    },
+    "Conduction Disorders": {
+        "WPW": 70,
+        "DIG": 13,
+        "PACE": 50,
+        "PRC(S)": 52,
+        "SR": 61
+    },
+    "Valvular and Structural Abnormalities": {
+        "RAO/RAE": 56,
+        "LAO/LAE": 37,
+        "ANEUR": 8,
+        "LPR": 42
+    },
+    "Other Cardiovascular Diseases": {
+        "BIGU": 10,
+        "TAB_": 67,
+        "TRIGU": 68,
+        "STD_": 63,
+        "STE_": 64,
+        "NT_": 48,
+        "NDT": 45,
+        "LNGQT": 39,
+        "LOWT": 40
+    },
+    "Heart Rate Abnormalities": {
+        "STACH": 62,
+        "SBRAD": 59,
+        "SVARR": 65
+    },
+    "Miscellaneous": {
+        "ABQRS": 3,
+        "HVOLT": 15,
+        "LVOLT": 44,
+        "NORM": 46,
+        "SEHYP": 60
+    }
+}
