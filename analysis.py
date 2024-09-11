@@ -30,7 +30,7 @@ logger = logging.getLogger()
 # Configuration parameters
 N_DATA = [2]
 OFFSET = None
-DEBUG = True
+DEBUG = False
 MODEL_TYPES = [1]#, 2, 3, 4, 11, 12, 13, 14]#, 15, 16]
 NUM_EPOCHS = 10
 BATCH_SIZE = 32

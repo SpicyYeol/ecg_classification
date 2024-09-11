@@ -4,7 +4,8 @@ from tqdm import tqdm
 from joblib import Parallel, delayed
 import neurokit2 as nk
 from scipy.signal import resample
-
+import json
+from datetime import datetime
 
 def resample_signal(signal, original_fs, target_fs):
     """
@@ -63,31 +64,72 @@ def preprocessing(signal, offset=None, fs=250, cutoff=30,plot=True):
         plt.show()
     return signal
 
+def convert_ndarray_to_list(data):
+    """Numpy 배열을 파이썬 리스트로 변환"""
+    if isinstance(data, np.ndarray):
+        return data.tolist()  # ndarray를 리스트로 변환
+    elif isinstance(data, dict):
+        # dict의 값이 ndarray일 경우 처리
+        return {key: convert_ndarray_to_list(value) for key, value in data.items()}
+    return data
 
-def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True):
+def preprocess_signal(signal, dtype, fs, plot):
+    if isinstance(signal, dict):
+        signal['data'] = preprocessing(signal['data'], fs=fs, plot=plot)
+        signal['data'] = generate_quality_map(signal['data'], start_idx=0, end_idx=None, fs=114, plot=plot)
+    else:
+        signal = preprocessing(signal, fs=fs, plot=plot)
+        signal = generate_quality_map(signal, start_idx=0, end_idx=None, fs=fs, plot=plot)
+
+    if dtype == 2:
+        signal['data'] = convert_to_image(signal['data'], int(np.ceil(np.sqrt(signal['data'].shape[0]))))
+
+    return signal
+
+def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_parallel=True, n_jobs=-1):
     #TODO : need to change json
     cnt = 0
 
     if debug:
-        preprocessed_data = []
-        for signal in tqdm(dataset, desc="Preprocessing"):
-            if isinstance(signal, dict):
-                signal['data'] = preprocessing(signal['data'],fs=fs, plot=plot)
-                signal['data'] = generate_quality_map(signal['data'],start_idx=0,end_idx=1000,fs=114,plot=plot)
-            else:
-                signal = preprocessing(signal,fs=fs,plot=plot)
-                signal = generate_quality_map(signal,start_idx=0,end_idx=None,fs=fs,plot=plot)
-
-            if dtype == 2:
-                signal['data'] = convert_to_image(signal['data'],int(np.ceil(np.sqrt(signal['data'].shape[0]))))
-            preprocessed_data.append(signal)
-            cnt +=1
-            if cnt ==5:
-                break
+        if use_parallel:
+            # 병렬 처리
+            preprocessed_data = Parallel(n_jobs=n_jobs)(
+                delayed(preprocess_signal)(signal, dtype, fs, plot) for signal in
+                tqdm(dataset[:5], desc="Preprocessing")
+            )
+        else:
+            # 순차 처리
+            preprocessed_data = []
+            for signal in tqdm(dataset[:5], desc="Preprocessing"):
+                processed_signal = preprocess_signal(signal, dtype, fs, plot)
+                preprocessed_data.append(processed_signal)
 
         # return dataset
     else:
-        preprocessed_data = Parallel(n_jobs=-1)(delayed(preprocessing)(signal, plot=plot) for signal in tqdm(dataset, desc="Preprocessing"))
+        if use_parallel:
+            # 병렬 처리
+            preprocessed_data = Parallel(n_jobs=n_jobs)(
+                delayed(preprocess_signal)(signal, dtype, fs, plot) for signal in
+                tqdm(dataset, desc="Preprocessing")
+            )
+        else:
+            # 순차 처리
+            preprocessed_data = []
+            for signal in tqdm(dataset, desc="Preprocessing"):
+                processed_signal = preprocess_signal(signal, dtype, fs, plot)
+                preprocessed_data.append(processed_signal)
+
+    # 결과 저장을 위한 변환 (ndarray -> list)
+    preprocessed_data = [convert_ndarray_to_list(signal) for signal in preprocessed_data]
+
+    current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = f'preprocessed_data_{current_time}.json'
+
+    with open(output_file, 'w') as f:
+        json.dump(preprocessed_data, f, indent=4)
+        print(f"\n\033[33mPreprocessed data has been saved to {output_file}\033[0m")
+
+
 
     if len(preprocessed_data) > 0:
         # Find the minimum length among all datasets
