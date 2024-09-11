@@ -86,48 +86,49 @@ def preprocess_signal(signal, dtype, fs, plot):
 
     return signal
 
-def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_parallel=True, n_jobs=-1):
+def preprocess_chunk(chunk, dtype, fs, plot, use_parallel, n_jobs):
+    if use_parallel:
+        preprocessed_chunk = Parallel(n_jobs=n_jobs)(
+            delayed(preprocess_signal)(signal, dtype, fs, plot) for signal in chunk
+        )
+    else:
+        preprocessed_chunk = [preprocess_signal(signal, dtype, fs, plot) for signal in chunk]
+
+    # Numpy 배열을 리스트로 변환
+    preprocessed_chunk = [convert_ndarray_to_list(signal) for signal in preprocessed_chunk]
+
+    return preprocessed_chunk
+
+def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_parallel=True, n_jobs=-1, chunk_size=32):
     #TODO : need to change json
     cnt = 0
-
-    if debug:
-        if use_parallel:
-            # 병렬 처리
-            preprocessed_data = Parallel(n_jobs=n_jobs)(
-                delayed(preprocess_signal)(signal, dtype, fs, plot) for signal in
-                tqdm(dataset[:5], desc="Preprocessing")
-            )
-        else:
-            # 순차 처리
-            preprocessed_data = []
-            for signal in tqdm(dataset[:5], desc="Preprocessing"):
-                processed_signal = preprocess_signal(signal, dtype, fs, plot)
-                preprocessed_data.append(processed_signal)
-
-        # return dataset
-    else:
-        if use_parallel:
-            # 병렬 처리
-            preprocessed_data = Parallel(n_jobs=n_jobs)(
-                delayed(preprocess_signal)(signal, dtype, fs, plot) for signal in
-                tqdm(dataset, desc="Preprocessing")
-            )
-        else:
-            # 순차 처리
-            preprocessed_data = []
-            for signal in tqdm(dataset, desc="Preprocessing"):
-                processed_signal = preprocess_signal(signal, dtype, fs, plot)
-                preprocessed_data.append(processed_signal)
-
-    # 결과 저장을 위한 변환 (ndarray -> list)
-    preprocessed_data = [convert_ndarray_to_list(signal) for signal in preprocessed_data]
+    chunk_idx = 0
+    preprocessed_data = []
 
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f'preprocessed_data_{current_time}.json'
+    save_path = f'F:\homes\preprocessed_data\preprocessed_data_{current_time}'
+    chunk_idx = 0
+    total_data_len = len(dataset)
 
-    with open(output_file, 'w') as f:
-        json.dump(preprocessed_data, f, indent=4)
-        print(f"\n\033[33mPreprocessed data has been saved to {output_file}\033[0m")
+    # 데이터 청크 단위로 처리
+    for start_idx in tqdm(range(0, total_data_len, chunk_size), desc="Processing dataset"):
+        end_idx = min(start_idx + chunk_size, total_data_len)
+        chunk = dataset[start_idx:end_idx]
+
+        # 각 청크에 대해 전처리
+        preprocessed_chunk = preprocess_chunk(chunk, dtype, fs, plot, use_parallel, n_jobs)
+
+        # 처리된 청크 저장
+        if save_path:
+            chunk_file = f"{save_path}_chunk_{chunk_idx}.json"
+            with open(chunk_file, 'w') as f:
+                json.dump(preprocessed_chunk, f, indent=4)
+            print(f"Chunk {chunk_idx} has been saved to {chunk_file}")
+
+        chunk_idx += 1
+
+
+
 
 
 
