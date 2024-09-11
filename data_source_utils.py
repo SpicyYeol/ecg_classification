@@ -64,23 +64,32 @@ def process_dataset(n_data, src_dir, offset, labels_dict=None):
         return []
 
 
-def load_all_datasets(src_dir, offset, labels_dict=None):
+def load_all_datasets(src_dir, offset, selected_dataset, labels_dict=None):
     all_data_contents = []
 
-    for n_data in dataset_info.keys():  # 모든 데이터셋 번호 반복
-        print(f"Processing dataset {n_data}: {dataset_info[n_data]['name']}")
-        data_dict = dataset_info[n_data]
-        if n_data > 1:
-            continue
-        dataset_contents  = data_dict["load_function"](data_dict, src_dir, offset,labels_dict)  # 해당 데이터셋 처리
+    if selected_dataset is None:
+        for n_data in dataset_info.keys():  # 모든 데이터셋 번호 반복
+            print(f"Processing dataset {n_data}: {dataset_info[n_data]['name']}")
+            data_dict = dataset_info[n_data]
+            if n_data > 1:
+                continue
+            dataset_contents  = data_dict["load_function"](data_dict, src_dir, offset,labels_dict)  # 해당 데이터셋 처리
 
-        all_data_contents.append(
-            {"data": dataset_contents,
-             "fs" : data_dict['fs']}
-        )  # 읽어온 데이터를 누적
+            all_data_contents.append(
+                {"data": dataset_contents,
+                 "fs" : data_dict['fs']}
+            )  # 읽어온 데이터를 누적
+    else:
+        for _selected_dataset in selected_dataset:
+            print(f"Processing dataset {_selected_dataset}: {dataset_info[_selected_dataset]['name']}")
+            data_dict = dataset_info[_selected_dataset]
+            dataset_contents = data_dict["load_function"](data_dict, src_dir, offset, labels_dict)  # 해당 데이터셋 처리
+            all_data_contents.append(
+                {"data": dataset_contents,
+                 "fs" : data_dict['fs']}
+            )  # 읽어온 데이터를 누적
 
     return all_data_contents
-
 
 def load_dataset(offset=3, src_dir="F:\homes\ecg_data", n_data=3):
     '''
@@ -115,15 +124,7 @@ def load_dataset(offset=3, src_dir="F:\homes\ecg_data", n_data=3):
     with open('labels.json', 'r') as f:
         labels_dict = json.load(f)
 
-    dataset_list = get_files_starting_with_number(src_dir)
-
-    data_dict = {}
-
-    for idx, dataset_dir in enumerate(dataset_list):
-        dataset_name = dataset_dir.split(' ')[-1]
-        print(dataset_name)
-
-    all_contents = load_all_datasets(src_dir, offset, labels_dict)
+    all_contents = load_all_datasets(src_dir, offset,n_data, labels_dict)
 
     return all_contents
 

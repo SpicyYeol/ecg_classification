@@ -1,3 +1,5 @@
+from re import match
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -26,7 +28,7 @@ logging.basicConfig(filename='training.log', level=logging.INFO, format='%(ascti
 logger = logging.getLogger()
 
 # Configuration parameters
-N_DATA = [1]
+N_DATA = [2]
 OFFSET = None
 DEBUG = True
 MODEL_TYPES = [1]#, 2, 3, 4, 11, 12, 13, 14]#, 15, 16]
@@ -77,24 +79,23 @@ def compute_class_weights(data_list, num_classes):
 
 def load_and_preprocess_data(offset, n_data, dtype, debug,plot=False):
     preprocessed_dataset = []
-    for n in n_data:
-        dataset = load_dataset(offset=offset, n_data=n)
-        if len(dataset) > 0:
-            for data in dataset:
-                preprocessed_dataset.append(preprocess_dataset(data['data'], dtype,data['fs'], plot=plot, debug=debug))
-                if preprocessed_dataset is not None and not debug:
-                    print("Stacked Contents Shape:", preprocessed_dataset.shape)
+    dataset = load_dataset(offset=offset, n_data=n_data)
+    if len(dataset) > 0:
+        for data in dataset:
+            preprocessed_dataset.append(preprocess_dataset(data['data'], dtype,data['fs'], plot=plot, debug=debug))
+            if preprocessed_dataset is not None and not debug:
+                print("Stacked Contents Shape:", preprocessed_dataset.shape)
 
-                    # Save the preprocessed dataset to a dynamically named file
-                    file_name = f'n_{n}.py'
-                    with open(file_name, 'w') as file:
-                        file.write(f'preprocessed_dataset = {repr(preprocessed_dataset.tolist())}')
+                # Save the preprocessed dataset to a dynamically named file
+                file_name = f'n_{n}.py'
+                with open(file_name, 'w') as file:
+                    file.write(f'preprocessed_dataset = {repr(preprocessed_dataset.tolist())}')
 
-            return preprocessed_dataset
-        else:
-            print("No valid ECG data found in the directory.")
-            continue
-            #return None
+        return preprocessed_dataset
+    else:
+        raise ("No valid ECG data found in the directory.")
+
+        #return None
 
 
 def create_dataloaders(preprocessed_dataset, batch_size=32, split_ratio=0.8):
@@ -300,7 +301,7 @@ def main():
     logger.info(f'NUM_EPOCHS: {NUM_EPOCHS}')
     logger.info(f'BATCH_SIZE: {BATCH_SIZE}')
     logger.info(f'LEARNING_RATE: {LEARNING_RATE}')
-
+    print("\033[33m#####ANAlYSIS SETTING#####\033[0m")
     print(f'Dataset Number: {N_DATA}')
     print(f'Number of sampe data: {OFFSET}')
     print(f'Mode: {DEBUG}')
@@ -313,8 +314,9 @@ def main():
     preprocessed_dataset = None
     current_dtype = None
 
+
     for model_type in MODEL_TYPES:
-        print(f'\nEvaluating Model Type: {model_type}')
+        print(f'\n\033[33m####Evaluating Model Type: {model_type}#####\033[0m')
         logger.info(f'Evaluating Model Type: {model_type}')
         dtype = 1 if model_type <= 10 else 2
 
