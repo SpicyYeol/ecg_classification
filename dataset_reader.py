@@ -32,17 +32,24 @@ def load_dataset_1(data_dict, src_dir, offset, labels_dict = None):
         all_contents.append(mat_contents)
     return all_contents
 
+# load af-classification dataset
 def load_dataset_2(data_dict, src_dir, offset, labels_dict = None):
     mats = find_files(os.path.join(src_dir, data_dict['name'], 'training2017'), '*.mat')
+    label_csv = os.path.join(src_dir, data_dict['name'], 'REFERENCE-v0.csv')
+    label_data = pd.read_csv(label_csv)
     all_contents = []
     for mat in mats[:offset]:
         mat_data = scipy.io.loadmat(mat)
+        label = label_data[label_data['filename'] == mat.split('\\')[-1].split('.')[0]].iloc[0]['label']
         if 'val' in mat_data:
             mat_contents = mat_data['val'][0]
         else:
             print(f"Warning: '{mat}' does not contain 'ecg_raw' or 'ecg'")
             continue
-        all_contents.append(mat_contents)
+        all_contents.append({
+            'data': mat_contents,
+            'label': label
+        })
     return all_contents
 
 def load_dataset_3(data_dict, src_dir, offset, labels_dict):
