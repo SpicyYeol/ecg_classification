@@ -1,11 +1,16 @@
-from re import match
+import glob
+import json
+import logging
+import os
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
+from joblib import Parallel, delayed
 from sklearn.metrics import r2_score, mean_squared_error
 from torch.utils.data import DataLoader, random_split
-from sklearn.utils.class_weight import compute_class_weight
+
 from ECGDataset import ECGDataset
 from data_source_utils import load_dataset
 from models.CNN2D import CNN2D
@@ -19,9 +24,6 @@ from models.TransformerModel import TransformerModel
 from models.VGGNet import VGGNet
 from models.ViT import ViT
 from preprocess_utils import preprocess_dataset
-import logging
-import matplotlib.pyplot as plt
-import os
 
 # 로그 설정
 logging.basicConfig(filename='training.log', level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -31,7 +33,7 @@ logger = logging.getLogger()
 N_DATA = [2]
 OFFSET = None
 DEBUG = False
-MODEL_TYPES = [1]#, 2, 3, 4, 11, 12, 13, 14]#, 15, 16]
+MODEL_TYPES = [1]  # , 2, 3, 4, 11, 12, 13, 14]#, 15, 16]
 NUM_EPOCHS = 10
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
@@ -52,6 +54,13 @@ os.makedirs(CAM_DIR, exist_ok=True)
     16. ViT                     2D
 '''
 
+
+def load_json_file(file_name):
+    """각 JSON 파일을 읽는 함수"""
+    with open(file_name, 'r', encoding='utf-8') as file:
+        return json.load(file)
+
+
 class WeightedMSELoss(nn.Module):
     def __init__(self, class_weights):
         super(WeightedMSELoss, self).__init__()
@@ -60,7 +69,6 @@ class WeightedMSELoss(nn.Module):
     def forward(self, inputs, targets):
         loss = (self.class_weights * (inputs - targets) ** 2).mean()
         return loss
-
 
 
 def compute_class_weights(data_list, num_classes):
@@ -77,11 +85,11 @@ def compute_class_weights(data_list, num_classes):
     class_weights = class_weights / class_weights.sum() * num_classes  # normalize weights
     return torch.tensor(class_weights, dtype=torch.float32)
 
-def load_and_preprocess_data(offset, n_data, dtype, debug,plot=False):
 
+def load_and_preprocess_data(offset, n_data, dtype, debug, plot=False):
     data_list_path = "F:\homes\data_list.txt"
 
-    chunk_file_name = []
+    chunk_file_name_list = []
     dataset_name = []
 
     with open(data_list_path, 'r', encoding='utf-8') as file:
@@ -89,22 +97,33 @@ def load_and_preprocess_data(offset, n_data, dtype, debug,plot=False):
             # 각 줄을 공백으로 분리
             parts = line.strip().split()
             if len(parts) == 2:  # 앞부분과 뒷부분이 존재하는 경우
-                chunk_file_name.append(parts[0])  # 앞부분 저장
+                chunk_file_name_list.append(parts[0])  # 앞부분 저장
                 dataset_name.append(int(parts[1]))  # 뒷부분 저장
 
     # n_data에서 dataset_name과 중복된 항목 제거
-    n_data = [ n for n in n_data if n not in dataset_name]
+    n_data = [n for n in n_data if n not in dataset_name]
 
     preprocessed_dataset = []
     dataset = load_dataset(offset=offset, n_data=n_data)
     if len(dataset) > 0:
         for data in dataset:
-            preprocessed_dataset.append(preprocess_dataset(data['data'], dtype,data['fs'], plot=plot, debug=debug))
-        return preprocessed_dataset
-    else:
-        raise ("No valid ECG data found in the directory.")
+            preprocessed_dataset.append(preprocess_dataset(data['data'], dtype, data['fs'], plot=plot, debug=debug))
 
-        #return None
+    all_files = []
+    for chunk_file_name in chunk_file_name_list:
+        file_pattern = "F:/homes/preprocessed_data/preprocessed_data_" + chunk_file_name + "_*.json"
+        file_list = glob.glob(file_pattern)
+        all_files.extend(file_list)  # 모든 파일을 리스트에 추가
+
+    # 병렬로 파일 로드
+    if all_files:
+        loaded_data = Parallel(n_jobs=-1)(delayed(load_json_file)(file_name) for file_name in all_files)
+
+        # 병렬 로드된 데이터를 하나의 리스트로 확장
+        for data in loaded_data:
+            preprocessed_dataset.extend(data)
+
+    # return None
 
 
 def create_dataloaders(preprocessed_dataset, batch_size=32, split_ratio=0.8):
@@ -231,7 +250,8 @@ def save_cam_image(cams, ecg_data, model_type, epoch, idx, num_classes):
         plt.close()
 
 
-def train_and_evaluate(model, train_loader, val_loader, class_weights, num_epochs=10, lr=0.001, weighted=False, model_type=None):
+def train_and_evaluate(model, train_loader, val_loader, class_weights, num_epochs=10, lr=0.001, weighted=False,
+                       model_type=None):
     if not weighted:
         criterion = nn.MSELoss()
     else:
@@ -247,7 +267,7 @@ def train_and_evaluate(model, train_loader, val_loader, class_weights, num_epoch
         model.train()
         for ecg_data, labels in train_loader:
             ecg_data = ecg_data.to(next(model.parameters()).device)  # Ensure ecg_data is on the correct device
-            labels = labels.to(next(model.parameters()).device)      # Ensure labels are on the correct device
+            labels = labels.to(next(model.parameters()).device)  # Ensure labels are on the correct device
 
             if type(model).__name__ == 'LSTMNet':
                 outputs = model(torch.permute(ecg_data, (0, 2, 1)))
@@ -264,7 +284,7 @@ def train_and_evaluate(model, train_loader, val_loader, class_weights, num_epoch
         all_outputs = []
         for idx, (ecg_data, labels) in enumerate(val_loader):
             ecg_data = ecg_data.to(next(model.parameters()).device)  # Ensure ecg_data is on the correct device
-            labels = labels.to(next(model.parameters()).device)      # Ensure labels are on the correct device
+            labels = labels.to(next(model.parameters()).device)  # Ensure labels are on the correct device
 
             if type(model).__name__ == 'LSTMNet':
                 outputs = model(torch.permute(ecg_data, (0, 2, 1)))
@@ -319,10 +339,8 @@ def main():
     print(f'BATCH_SIZE: {BATCH_SIZE}')
     print(f'LEARNING_RATE: {LEARNING_RATE}')
 
-
     preprocessed_dataset = None
     current_dtype = None
-
 
     for model_type in MODEL_TYPES:
         print(f'\n\033[33m####Evaluating Model Type: {model_type}#####\033[0m')
@@ -341,10 +359,11 @@ def main():
             num_classes = preprocessed_dataset[0]['labels'].shape[0]
 
             class_weights = compute_class_weights(preprocessed_dataset, num_classes)
-            for weighted_flag in [True]:#, True]:
+            for weighted_flag in [True]:  # , True]:
                 logger.info(f'weighted Loss Type: {weighted_flag}')
                 model = initialize_model(model_type, ecg_data_length, num_classes)
-                train_and_evaluate(model, train_loader, val_loader, class_weights, NUM_EPOCHS, LEARNING_RATE, weighted_flag, model_type)
+                train_and_evaluate(model, train_loader, val_loader, class_weights, NUM_EPOCHS, LEARNING_RATE,
+                                   weighted_flag, model_type)
 
 
 if __name__ == "__main__":

@@ -124,21 +124,6 @@ def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_pa
 
         chunk_idx += 1
 
-    if len(preprocessed_data) > 0:
-        # Find the minimum length among all datasets
-        min_length = min([data.shape[0] for data in preprocessed_data])
-
-        # Truncate each dataset to the minimum length
-        truncated_data = [data[:min_length] for data in preprocessed_data]
-
-        # Stack the truncated datasets
-        stacked_contents = np.stack(truncated_data, axis=0)
-        print("Final stacked contents shape:", stacked_contents.shape)
-
-        return stacked_contents
-    else:
-        print("No valid preprocessed data found.")
-        return None
 
 
 def generate_mapped_signal(signal, fs=300, start_idx=0, end_idx=None, plot=False):
