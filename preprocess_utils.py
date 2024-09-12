@@ -100,9 +100,6 @@ def preprocess_chunk(chunk, dtype, fs, plot, use_parallel, n_jobs):
     return preprocessed_chunk
 
 def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_parallel=True, n_jobs=-1, chunk_size=32):
-    #TODO : need to change json
-    cnt = 0
-    chunk_idx = 0
     preprocessed_data = []
 
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -126,11 +123,6 @@ def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_pa
             print(f"Chunk {chunk_idx} has been saved to {chunk_file}")
 
         chunk_idx += 1
-
-
-
-
-
 
     if len(preprocessed_data) > 0:
         # Find the minimum length among all datasets

@@ -78,19 +78,28 @@ def compute_class_weights(data_list, num_classes):
     return torch.tensor(class_weights, dtype=torch.float32)
 
 def load_and_preprocess_data(offset, n_data, dtype, debug,plot=False):
+
+    data_list_path = "F:\homes\data_list.txt"
+
+    chunk_file_name = []
+    dataset_name = []
+
+    with open(data_list_path, 'r', encoding='utf-8') as file:
+        for line in file:
+            # 각 줄을 공백으로 분리
+            parts = line.strip().split()
+            if len(parts) == 2:  # 앞부분과 뒷부분이 존재하는 경우
+                chunk_file_name.append(parts[0])  # 앞부분 저장
+                dataset_name.append(int(parts[1]))  # 뒷부분 저장
+
+    # n_data에서 dataset_name과 중복된 항목 제거
+    n_data = [ n for n in n_data if n not in dataset_name]
+
     preprocessed_dataset = []
     dataset = load_dataset(offset=offset, n_data=n_data)
     if len(dataset) > 0:
         for data in dataset:
             preprocessed_dataset.append(preprocess_dataset(data['data'], dtype,data['fs'], plot=plot, debug=debug))
-            if preprocessed_dataset is not None and not debug:
-                print("Stacked Contents Shape:", preprocessed_dataset.shape)
-
-                # Save the preprocessed dataset to a dynamically named file
-                file_name = f'n_{n}.py'
-                with open(file_name, 'w') as file:
-                    file.write(f'preprocessed_dataset = {repr(preprocessed_dataset.tolist())}')
-
         return preprocessed_dataset
     else:
         raise ("No valid ECG data found in the directory.")
