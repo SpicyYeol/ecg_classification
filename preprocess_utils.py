@@ -7,6 +7,45 @@ from scipy.signal import resample
 import json
 from datetime import datetime
 
+
+def segment_ecg(data, sampling_rate=114, window_duration=3, overlap_duration=0.5):
+    """
+    ECG 데이터를 주어진 윈도우 크기와 겹침을 고려하여 분할하는 함수.
+
+    :param data: ECG 데이터 (1D array 또는 list)
+    :param sampling_rate: 샘플링 속도 (Hz)
+    :param window_duration: 윈도우 크기 (초) - 최소 3개의 ECG 파형을 포함할 수 있는 크기
+    :param overlap_duration: 겹침 크기 (초) - 0.5초씩 겹침
+    :return: 분할된 ECG 데이터 세그먼트 리스트
+    """
+    # 윈도우 크기와 겹침 크기를 샘플 단위로 변환
+    window_size = int(window_duration * sampling_rate)  # 3초에 해당하는 샘플 개수
+    overlap_size = int(overlap_duration * sampling_rate)  # 0.5초에 해당하는 샘플 개수
+
+    # 분할된 데이터를 저장할 리스트
+    segmented_data = []
+
+    # 슬라이딩 윈도우로 데이터 분할
+    start = 0
+    while start + window_size <= len(data):
+        end = start + window_size
+        segmented_data.append(data[start:end])
+        start += window_size - overlap_size  # 겹침을 고려한 다음 윈도우의 시작 지점
+
+    return segmented_data
+
+def get_min_max_data_length(preprocessed_dataset):
+    # 'data' 필드의 길이를 저장할 리스트
+    data_lengths = [len(item['data']) for item in preprocessed_dataset if 'data' in item]
+
+    if data_lengths:
+        min_length = min(data_lengths)
+        max_length = max(data_lengths)
+        return min_length, max_length
+    else:
+        raise ValueError("The dataset does not contain 'data' field or is empty.")
+
+
 def resample_signal(signal, original_fs, target_fs):
     """
     신호를 재샘플링하는 함수.
