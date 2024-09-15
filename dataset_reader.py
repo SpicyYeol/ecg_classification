@@ -8,7 +8,23 @@ import numpy as np
 import wfdb
 import re
 from numpy.distutils.conv_template import header
+import ast
 
+category_priority = {'S': 1, 'V': 2, 'Q': 3, 'N': 4}
+
+
+def select_highest_priority_category(categories):
+    # 유효한 카테고리만 필터링
+    valid_categories = [cat for cat in categories if cat in category_priority]
+
+    if not valid_categories:
+        return 'Unknown'  # 유효한 카테고리가 없을 경우
+
+    # 우선순위에 따라 정렬
+    sorted_categories = sorted(valid_categories, key=lambda x: category_priority[x])
+
+    # 우선순위가 가장 높은 카테고리 반환
+    return sorted_categories[0]
 
 def read_hea_file(hea_file_path,path):
     """
@@ -181,11 +197,58 @@ def load_dataset_3(data_dict, src_dir, offset, labels_dict):
     return all_contents
 
 def load_dataset_4(data_dict, src_dir, offset, labels_dict = None):
-    heas = find_files(os.path.join(src_dir, data_dict['dataset_name'], 'records' + str(data_dict['fs'])), '*.hea')
+    heas = find_files(os.path.join(src_dir, data_dict['name'], 'records' + str(data_dict['fs'])), '*.hea')
+    csv_file_path = os.path.join(src_dir, data_dict['name'],"ptbxl_database.csv")
+    df = pd.read_csv(csv_file_path, usecols=['scp_codes', 'filename_hr'])
+
+    def extract_filename_from_path(file_path):
+        base_name = os.path.basename(file_path)
+        filename_without_ext = os.path.splitext(base_name)[0]
+        return filename_without_ext
+
+    df['filename_hr_only'] = df['filename_hr'].apply(extract_filename_from_path)
+
+    filename_to_scp_codes = dict(zip(df['filename_hr_only'], df['scp_codes']))
+
+    def extract_filename(file_path):
+        base_name = os.path.basename(file_path)  # 파일명.확장자 추출
+        filename_without_ext = os.path.splitext(base_name)[0]  # 확장자 제거
+        return filename_without_ext
+
+    with open('dataset_4.json', 'r', encoding='utf-8') as f:
+        dataset = json.load(f)
+
+    code_to_category = {}
+
+    for category, subcategories in dataset.items():
+        for subcategory, codes in subcategories.items():
+            for code, description in codes.items():
+                code_to_category[code] = category  # 코드와 카테고리 매핑
+
+    file_final_category_dict = {}
     all_contents = []
     for hea in heas[:offset]:
         record = wfdb.rdrecord(hea[:-4])
-        all_contents.append(record.p_signal[:,1])
+        #all_contents.append(record.p_signal[:,1])
+        file_name = extract_filename(hea)
+        matched_scp_codes = filename_to_scp_codes.get(file_name)
+        matched_scp_codes = ast.literal_eval(matched_scp_codes)
+        if matched_scp_codes:
+            # matched_scp_codes의 코드들을 카테고리로 매핑
+            categories = []
+            for code in matched_scp_codes.keys():
+                category = code_to_category.get(code)
+                if category:
+                    categories.append(category)
+                else:
+                    continue
+                    #categories.append('Unknown')
+            # 우선순위에 따라 최종 카테고리 선택
+            final_category = select_highest_priority_category(categories)
+            all_contents.append({
+                'data': record.p_signal[:,1],
+                'label': final_category[0]
+            })
     return all_contents
 
 def load_dataset_5(data_dict, src_dir, offset, labels_dict = None):
