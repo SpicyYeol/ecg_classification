@@ -8,7 +8,7 @@ import json
 from datetime import datetime
 
 
-def segment_ecg(data, sampling_rate=114, window_duration=3, overlap_duration=0.5):
+def segment_ecg(data, sampling_rate=100, window_duration=3, overlap_duration=0.5):
     """
     ECG 데이터를 주어진 윈도우 크기와 겹침을 고려하여 분할하는 함수.
 
@@ -95,7 +95,7 @@ def iqr_normalize(data):
     return normalized_data
 
 def preprocessing(signal, offset=None, fs=250, cutoff=30,plot=True):
-    signal = resample_signal(signal,fs,114)
+    signal = resample_signal(signal,fs,100)
     signal = detrend(signal[:offset], 100)
     signal = min_max_normalize(iqr_normalize(signal))
     if plot:
@@ -115,10 +115,10 @@ def convert_ndarray_to_list(data):
 def preprocess_signal(signal, dtype, fs, plot):
     if isinstance(signal, dict):
         signal['data'] = preprocessing(signal['data'], fs=fs, plot=plot)
-        signal['data'] = generate_quality_map(signal['data'], start_idx=0, end_idx=None, fs=114, plot=plot)
+        signal['data'] = generate_quality_map(signal['data'], start_idx=0, end_idx=None, fs=100, plot=plot)
     else:
         signal = preprocessing(signal, fs=fs, plot=plot)
-        signal = generate_quality_map(signal, start_idx=0, end_idx=None, fs=114, plot=plot)
+        signal = generate_quality_map(signal, start_idx=0, end_idx=None, fs=100, plot=plot)
 
     if dtype == 2:
         signal['data'] = convert_to_image(signal['data'], int(np.ceil(np.sqrt(signal['data'].shape[0]))))
