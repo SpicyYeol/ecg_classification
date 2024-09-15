@@ -118,7 +118,7 @@ def preprocess_signal(signal, dtype, fs, plot):
         signal['data'] = generate_quality_map(signal['data'], start_idx=0, end_idx=None, fs=114, plot=plot)
     else:
         signal = preprocessing(signal, fs=fs, plot=plot)
-        signal = generate_quality_map(signal, start_idx=0, end_idx=None, fs=fs, plot=plot)
+        signal = generate_quality_map(signal, start_idx=0, end_idx=None, fs=114, plot=plot)
 
     if dtype == 2:
         signal['data'] = convert_to_image(signal['data'], int(np.ceil(np.sqrt(signal['data'].shape[0]))))

@@ -30,7 +30,7 @@ logging.basicConfig(filename='training.log', level=logging.INFO, format='%(ascti
 logger = logging.getLogger()
 
 # Configuration parameters
-N_DATA = [2]
+N_DATA = [6] # 완료 2
 OFFSET = None
 DEBUG = False
 MODEL_TYPES = [1]  # , 2, 3, 4, 11, 12, 13, 14]#, 15, 16]

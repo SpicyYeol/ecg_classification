@@ -13,7 +13,8 @@ import re
 
 from dataset_reader import (find_files, load_dataset_1,
                             load_dataset_2, load_dataset_3,
-                            load_dataset_4, load_dataset_8,
+                            load_dataset_4, load_dataset_5,
+                            load_dataset_6, load_dataset_8,
                             load_generic_dataset)
 
 dataset_info = {
@@ -21,8 +22,8 @@ dataset_info = {
     2: {"name": "2. af-classification", "fs": 300, "path_suffix": "training2017", "load_function": load_dataset_2},
     3: {"name": "3. ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.1", "fs": 100, "path_suffix": "records100", "load_function": load_dataset_3},
     4: {"name": "4. ptb-xl-a-large-publicly-available-electrocardiography-dataset-1.0.1", "fs": 500, "path_suffix": "records500", "load_function": load_dataset_4},
-    5: {"name": "5. brno-university-of-technology-ecg-quality-database-but-qdb-1.0.0", "fs": None, "path_suffix": "", "load_function": load_generic_dataset},
-    6: {"name": "6. a-large-scale-12-lead-electrocardiogram-database-for-arrhythmia-study-1.0.0", "fs": None, "path_suffix": "", "load_function": load_generic_dataset},
+    5: {"name": "5. brno-university-of-technology-ecg-quality-database-but-qdb-1.0.0", "fs": None, "path_suffix": "", "load_function": load_dataset_5},
+    6: {"name": "6. a-large-scale-12-lead-electrocardiogram-database-for-arrhythmia-study-1.0.0", "fs": 500, "path_suffix": "", "load_function": load_dataset_6},
     # MIT-BIH
     8: {"name": "8. ecg-fragment-database-for-the-exploration-of-dangerous-arrhythmia-1.0.0", "fs": None, "path_suffix": "", "load_function": load_dataset_8},
 }
