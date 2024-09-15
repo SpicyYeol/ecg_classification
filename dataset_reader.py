@@ -44,10 +44,10 @@ def read_hea_file(hea_file_path,path):
         header_parts = header_line.split()
         header_info['record_name'] = header_parts[0]
         header_info['num_signals'] = int(header_parts[1]) if len(header_parts) > 1 else None
-        header_info['sampling_frequency'] = float(header_parts[2].split('/')[0]) if len(header_parts) > 2 else None
-        header_info['num_samples'] = int(header_parts[3]) if len(header_parts) > 3 else None
-        header_info['base_time'] = header_parts[4] if len(header_parts) > 4 else None
-        header_info['base_date'] = header_parts[5] if len(header_parts) > 5 else None
+        # header_info['sampling_frequency'] = float(header_parts[2].split('/')[0]) if len(header_parts) > 2 else None
+        # header_info['num_samples'] = int(header_parts[3]) if len(header_parts) > 3 else None
+        # header_info['base_time'] = header_parts[4] if len(header_parts) > 4 else None
+        # header_info['base_date'] = header_parts[5] if len(header_parts) > 5 else None
         numbers = re.findall(r'\d+', lines[15].strip())
         numbers = [num for num in numbers]
 
@@ -69,21 +69,21 @@ def read_hea_file(hea_file_path,path):
             signal_parts = line.split()
             signal_info = {}
 
-            if len(signal_parts) >= 2:
-                signal_info['filename'] = signal_parts[0]
-                signal_info['format'] = signal_parts[1]
-            if len(signal_parts) >= 3:
-                signal_info['gain'] = signal_parts[2]
-            if len(signal_parts) >= 4:
-                signal_info['bit_resolution'] = int(signal_parts[3])
-            if len(signal_parts) >= 5:
-                signal_info['zero_value'] = int(signal_parts[4])
-            if len(signal_parts) >= 6:
-                signal_info['first_value'] = int(signal_parts[5])
-            if len(signal_parts) >= 7:
-                signal_info['checksum'] = int(signal_parts[6])
-            if len(signal_parts) >= 8:
-                signal_info['block_size'] = int(signal_parts[7])
+            # if len(signal_parts) >= 2:
+            #     signal_info['filename'] = signal_parts[0]
+            #     signal_info['format'] = signal_parts[1]
+            # if len(signal_parts) >= 3:
+            #     signal_info['gain'] = signal_parts[2]
+            # if len(signal_parts) >= 4:
+            #     signal_info['bit_resolution'] = int(signal_parts[3])
+            # if len(signal_parts) >= 5:
+            #     signal_info['zero_value'] = int(signal_parts[4])
+            # if len(signal_parts) >= 6:
+            #     signal_info['first_value'] = int(signal_parts[5])
+            # if len(signal_parts) >= 7:
+            #     signal_info['checksum'] = int(signal_parts[6])
+            # if len(signal_parts) >= 8:
+            #     signal_info['block_size'] = int(signal_parts[7])
             if len(signal_parts) >= 9:
                 signal_info['description'] = ' '.join(signal_parts[8:])
 
@@ -227,6 +227,9 @@ def load_dataset_6(data_dict, src_dir, offset, labels_dict = None):
 
         category_priority = {'S': 1, 'V': 2, 'Q': 3, 'N': 4}
         label = sorted(label, key=lambda x: category_priority[x])
+
+        if len(label) == 0:
+            label = ['N']
 
         all_contents.append({
             'data': mat_contents,
