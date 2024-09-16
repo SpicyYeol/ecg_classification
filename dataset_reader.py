@@ -134,7 +134,7 @@ def find_files(directory, ext='*.mat'):
             mat_files.append(file)
     return mat_files
 # 데이터 로딩 함수 정의
-def load_dataset_1(data_dict, src_dir, offset, labels_dict = None):
+def load_dataset_1(clustering, data_dict, src_dir, offset, labels_dict = None):
     mats = find_files(os.path.join(src_dir, data_dict['name']), '*.mat')
     all_contents = []
     for mat in mats[:offset]:
@@ -150,7 +150,7 @@ def load_dataset_1(data_dict, src_dir, offset, labels_dict = None):
     return all_contents
 
 # load af-classification dataset
-def load_dataset_2(data_dict, src_dir, offset, labels_dict = None):
+def load_dataset_2(clustering, data_dict, src_dir, offset, labels_dict = None):
     mats = find_files(os.path.join(src_dir, data_dict['name'], 'training2017'), '*.mat')
     label_csv = os.path.join(src_dir, data_dict['name'], 'REFERENCE-v0.csv')
     label_data = pd.read_csv(label_csv)
@@ -169,7 +169,7 @@ def load_dataset_2(data_dict, src_dir, offset, labels_dict = None):
         })
     return all_contents
 
-def load_dataset_3(data_dict, src_dir, offset, labels_dict):
+def load_dataset_3(clustering, data_dict, src_dir, offset, labels_dict):
     ann_path = os.path.join(src_dir, data_dict['name'], 'ptbxl_database.csv')
     df = pd.read_csv(ann_path)
     df_with_scp_codes = df[df['scp_codes'].notna()]
@@ -196,7 +196,7 @@ def load_dataset_3(data_dict, src_dir, offset, labels_dict):
             all_contents.append({'ecg': ecg_data, 'labels': one_hot_encoded})
     return all_contents
 
-def load_dataset_4(data_dict, src_dir, offset, labels_dict = None):
+def load_dataset_4(clustering, data_dict, src_dir, offset, labels_dict = None):
     heas = find_files(os.path.join(src_dir, data_dict['name'], 'records' + str(data_dict['fs'])), '*.hea')
     csv_file_path = os.path.join(src_dir, data_dict['name'],"ptbxl_database.csv")
     df = pd.read_csv(csv_file_path, usecols=['scp_codes', 'filename_hr'])
@@ -235,27 +235,33 @@ def load_dataset_4(data_dict, src_dir, offset, labels_dict = None):
         matched_scp_codes = ast.literal_eval(matched_scp_codes)
         if matched_scp_codes:
             # matched_scp_codes의 코드들을 카테고리로 매핑
-            categories = []
-            for code in matched_scp_codes.keys():
-                category = code_to_category.get(code)
-                if category:
-                    categories.append(category)
-                else:
-                    continue
-                    #categories.append('Unknown')
-            # 우선순위에 따라 최종 카테고리 선택
-            final_category = select_highest_priority_category(categories)
-            all_contents.append({
-                'data': record.p_signal[:,1],
-                'label': final_category[0]
-            })
+            if clustering:
+                all_contents.append({
+                    'data': record.p_signal[:, 1],
+                    'label': matched_scp_codes
+                })
+            else:
+                categories = []
+                for code in matched_scp_codes.keys():
+                    category = code_to_category.get(code)
+                    if category:
+                        categories.append(category)
+                    else:
+                        continue
+                        #categories.append('Unknown')
+                # 우선순위에 따라 최종 카테고리 선택
+                final_category = select_highest_priority_category(categories)
+                all_contents.append({
+                    'data': record.p_signal[:,1],
+                    'label': final_category[0]
+                })
     return all_contents
 
-def load_dataset_5(data_dict, src_dir, offset, labels_dict = None):
+def load_dataset_5(clustering, data_dict, src_dir, offset, labels_dict = None):
     # 여기에 다른 데이터셋에 대한 로직을 추가할 수 있습니다.
     return []
 
-def load_dataset_6(data_dict, src_dir, offset, labels_dict = None):
+def load_dataset_6(clustering, data_dict, src_dir, offset, labels_dict = None):
     # 여기에 다른 데이터셋에 대한 로직을 추가할 수 있습니다.
     root_dir = os.path.join(src_dir,data_dict['name'], 'WFDBRecords')
     file_list = find_mat_and_hea_files(root_dir)
@@ -293,19 +299,24 @@ def load_dataset_6(data_dict, src_dir, offset, labels_dict = None):
 
         if len(label) == 0:
             label = ['N']
-
-        all_contents.append({
-            'data': mat_contents,
-            'label': label[0]
-        })
+        if clustering:
+            all_contents.append({
+                'data': mat_contents,
+                'label': label_tmp
+            })
+        else:
+            all_contents.append({
+                'data': mat_contents,
+                'label': label[0]
+            })
 
 
     return all_contents
 
 
-def load_dataset_8(data_dict, src_dir, offset, labels_dict = None):
+def load_dataset_8(clustering, data_dict, src_dir, offset, labels_dict = None):
     # 여기에 다른 데이터셋에 대한 로직을 추가할 수 있습니다.
     return []
-def load_generic_dataset(data_dict, src_dir, offset, labels_dict = None):
+def load_generic_dataset(clustering, data_dict, src_dir, offset, labels_dict = None):
     # 여기에 다른 데이터셋에 대한 로직을 추가할 수 있습니다.
     return []

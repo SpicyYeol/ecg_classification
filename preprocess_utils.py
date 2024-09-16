@@ -138,11 +138,11 @@ def preprocess_chunk(chunk, dtype, fs, plot, use_parallel, n_jobs):
 
     return preprocessed_chunk
 
-def preprocess_dataset(dataset,dtype=1, fs = 100, plot=False, debug=True, use_parallel=True, n_jobs=-1, chunk_size=32):
+def preprocess_dataset(dataset,dtype=1, fs = 100, clustering=False,plot=False,  use_parallel=True, n_jobs=-1, chunk_size=32):
     preprocessed_data = []
 
     current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f'F:\homes\preprocessed_data\preprocessed_data_{current_time}'
+    save_path = f'F:\homes\preprocessed_data_{clustering}\preprocessed_data_{current_time}'
     chunk_idx = 0
     total_data_len = len(dataset)
 

@@ -65,7 +65,7 @@ def process_dataset(n_data, src_dir, offset, labels_dict=None):
         return []
 
 
-def load_all_datasets(src_dir, offset, selected_dataset, labels_dict=None):
+def load_all_datasets(src_dir, offset, selected_dataset, clustering = False,labels_dict=None):
     all_data_contents = []
 
     if selected_dataset is None:
@@ -74,7 +74,7 @@ def load_all_datasets(src_dir, offset, selected_dataset, labels_dict=None):
             data_dict = dataset_info[n_data]
             if n_data > 1:
                 continue
-            dataset_contents  = data_dict["load_function"](data_dict, src_dir, offset,labels_dict)  # 해당 데이터셋 처리
+            dataset_contents  = data_dict["load_function"](clustering, data_dict, src_dir, offset,labels_dict)  # 해당 데이터셋 처리
 
             all_data_contents.append(
                 {"data": dataset_contents,
@@ -84,7 +84,7 @@ def load_all_datasets(src_dir, offset, selected_dataset, labels_dict=None):
         for _selected_dataset in selected_dataset:
             print(f"Processing dataset {_selected_dataset}: {dataset_info[_selected_dataset]['name']}")
             data_dict = dataset_info[_selected_dataset]
-            dataset_contents = data_dict["load_function"](data_dict, src_dir, offset, labels_dict)  # 해당 데이터셋 처리
+            dataset_contents = data_dict["load_function"](clustering, data_dict, src_dir, offset, labels_dict)  # 해당 데이터셋 처리
             all_data_contents.append(
                 {"data": dataset_contents,
                  "fs" : data_dict['fs']}
@@ -92,7 +92,7 @@ def load_all_datasets(src_dir, offset, selected_dataset, labels_dict=None):
 
     return all_data_contents
 
-def load_dataset(offset=3, src_dir="F:\homes\ecg_data", n_data=3):
+def load_dataset(clustering,offset=3, src_dir="F:\homes\ecg_data",n_data=3):
     '''
     :param src_dir: src destination of dataset
     :param n_data: dataset number
@@ -125,7 +125,7 @@ def load_dataset(offset=3, src_dir="F:\homes\ecg_data", n_data=3):
     with open('labels.json', 'r') as f:
         labels_dict = json.load(f)
 
-    all_contents = load_all_datasets(src_dir, offset,n_data, labels_dict)
+    all_contents = load_all_datasets(src_dir, offset,n_data, clustering, labels_dict)
 
     return all_contents
 

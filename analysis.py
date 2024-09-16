@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from joblib import Parallel, delayed
+from networkx.algorithms.bipartite import clustering
 from sklearn.metrics import r2_score, mean_squared_error
 from torch.utils.data import DataLoader, random_split
 
@@ -30,13 +31,14 @@ logging.basicConfig(filename='training.log', level=logging.INFO, format='%(ascti
 logger = logging.getLogger()
 
 # Configuration parameters
-N_DATA = [4] # 완료 2,6
+N_DATA = [2] # 완료 2,4,6
 OFFSET = None
 DEBUG = False
 MODEL_TYPES = [1]  # , 2, 3, 4, 11, 12, 13, 14]#, 15, 16]
 NUM_EPOCHS = 10
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
+CLUSTERING = False
 PLOT = False
 SAVE_CAM = True  # Save CAM images
 CAM_DIR = 'cam_images'  # Directory to save CAM images
@@ -86,8 +88,8 @@ def compute_class_weights(data_list, num_classes):
     return torch.tensor(class_weights, dtype=torch.float32)
 
 
-def load_and_preprocess_data(offset, n_data, dtype, debug, plot=False):
-    data_list_path = "F:\homes\data_list.txt"
+def load_and_preprocess_data(offset, n_data, dtype, debug,clustering =False, plot=False):
+    data_list_path = "F:\homes\data_list_"+str(clustering)+".txt"
 
     chunk_file_name_list = []
     dataset_name = []
@@ -104,14 +106,14 @@ def load_and_preprocess_data(offset, n_data, dtype, debug, plot=False):
     n_data = [n for n in n_data if n not in dataset_name]
 
     preprocessed_dataset = []
-    dataset = load_dataset(offset=offset, n_data=n_data)
+    dataset = load_dataset(offset=offset, clustering= clustering, n_data=n_data)
     if len(dataset) > 0:
         for data in dataset:
-            preprocessed_dataset.append(preprocess_dataset(data['data'], dtype, data['fs'], plot=plot, debug=debug))
+            preprocessed_dataset.append(preprocess_dataset(data['data'], dtype, data['fs'], clustering= clustering, plot=plot))
 
     all_files = []
     for chunk_file_name in chunk_file_name_list:
-        file_pattern = "F:/homes/preprocessed_data/preprocessed_data_" + chunk_file_name + "_*.json"
+        file_pattern = "F:/homes/preprocessed_data_"+str(clustering)+"/"+ str(dataset_name)+"/preprocessed_data_" + chunk_file_name + "_*.json"
         file_list = glob.glob(file_pattern)
         all_files.extend(file_list)  # 모든 파일을 리스트에 추가
 
@@ -122,6 +124,7 @@ def load_and_preprocess_data(offset, n_data, dtype, debug, plot=False):
         # 병렬 로드된 데이터를 하나의 리스트로 확장
         for data in loaded_data:
             preprocessed_dataset.extend(data)
+        return preprocessed_dataset
 
     # return None
 

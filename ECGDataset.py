@@ -35,14 +35,23 @@ class ECGDataset(Dataset):
         """
         ecg_segment, label = self.data_label_pairs[idx]
         ecg_tensor = torch.tensor(ecg_segment, dtype=torch.float32)
+        # if label == 'N':
+        #     label = 0
+        # elif label == 'A':
+        #     label = 1
+        # elif label == 'O':
+        #     label = 2
+        # elif label == '~':
+        #     label = 3
         if label == 'N':
             label = 0
-        elif label == 'A':
+        elif label == 'S':
             label = 1
-        elif label == 'O':
+        elif label == 'V':
             label = 2
-        elif label == '~':
+        elif label == 'Q':
             label = 3
+
 
         label_tensor = torch.tensor(label, dtype=torch.long)  # 레이블은 보통 정수형
         return ecg_tensor, label_tensor
