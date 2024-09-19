@@ -99,8 +99,10 @@ def load_and_preprocess_data(offset, n_data, dtype, debug,clustering =False, plo
             # 각 줄을 공백으로 분리
             parts = line.strip().split()
             if len(parts) == 2:  # 앞부분과 뒷부분이 존재하는 경우
-                chunk_file_name_list.append(parts[0])  # 앞부분 저장
-                dataset_name.append(int(parts[1]))  # 뒷부분 저장
+                if int(parts[1]) in n_data:
+                    chunk_file_name_list.append(parts[0])  # 앞부분 저장
+                    dataset_name.append(int(parts[1]))  # 뒷부분 저장
+
 
     # n_data에서 dataset_name과 중복된 항목 제거
     n_data = [n for n in n_data if n not in dataset_name]
