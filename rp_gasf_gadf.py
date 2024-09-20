@@ -1,15 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from mpl_toolkits.mplot3d.proj3d import transform
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import autocast, GradScaler
-
+import os
 # Additional libraries for data transformation
 import numpy as np
 from pyts.image import RecurrencePlot, GramianAngularField, MarkovTransitionField
 
 from ecg_cluster import load_and_preprocess_ecg_data
-
+import seaborn as sns
+import matplotlib.pyplot as plt
 import warnings
 
 # 경고 메시지 숨기기
@@ -32,7 +34,11 @@ dim_feedforward = 128  # FFN의 차원
 seq_length = 300  # ECG 시퀀스 길이
 batch_size = 32
 num_epochs = 10
-num_classes = 4  # a, b, c, d에 대한 4개 클래스
+# num_classes = 4  # a, b, c, d에 대한 4개 클래스
+
+# option = ['TRAIN', 'VAL', 'HEATMAP']
+option = ['VAL']
+
 
 # Define the Dataset class
 class ECGDataset(Dataset):
@@ -252,7 +258,7 @@ class ECGTransformer(nn.Module):
 Batch = 16  # Batch size
 # Generate variable-length data
 
-ecg_data_A = load_and_preprocess_ecg_data(OFFSET, [2], dtype, DEBUG, CLUSTERING, PLOT)
+ecg_data_A = load_and_preprocess_ecg_data(OFFSET, [2], dtype, DEBUG, CLUSTERING, PLOT)[:1500]
 # ecg_data_B = load_and_preprocess_ecg_data(OFFSET, [4], dtype, DEBUG, CLUSTERING, PLOT)
 
 # 샘플 ECG 데이터 (랜덤 데이터로 대체)
@@ -275,9 +281,16 @@ labels = np.array([label_to_idx_A[d['label']] for d in ecg_data_A])
 #     labels.append(np.random.randint(0, 2))
 # labels = np.array(labels)
 
+from sklearn.model_selection import train_test_split
+train_data, val_data, train_labels, val_labels = train_test_split(
+    data, labels, test_size=0.2, random_state=42)
+
 # Create dataset and DataLoader
-dataset = ECGDataset(data, labels)
-data_loader = DataLoader(dataset, batch_size=Batch, shuffle=True, collate_fn=collate_fn)
+train_dataset = ECGDataset(train_data, train_labels)
+val_dataset = ECGDataset(val_data, val_labels)
+
+train_loader  = DataLoader(train_dataset, batch_size=Batch, shuffle=True, collate_fn=collate_fn)
+val_loader  = DataLoader(val_dataset, batch_size=Batch, shuffle=True, collate_fn=collate_fn)
 
 # Initialize the model, loss function, and optimizer
 num_classes = len(label_to_idx_A)  # Adjust based on your classification task
@@ -288,71 +301,136 @@ optimizer = optim.Adam(model.parameters(), lr=1e-3)
 # Training loop with model saving after every epoch
 save_path = './ecg_transformer_model.pth'  # 모델을 저장할 경로
 
+if os.path.exists(save_path):
+    print(f"Loading model from {save_path}")
+    checkpoint = torch.load(save_path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    start_epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+    print(f"Model loaded. Resuming training from epoch {start_epoch}.")
+else:
+    print("No saved model found. Starting training from scratch.")
+    start_epoch = 0  # 모델을 처음부터 학습
 
-# Training loop
-num_epochs = 20
-for epoch in range(num_epochs):
-    model.train()
-    running_loss = 0.0
-    accumulation_steps = 8  # 4개의 미니 배치마다 한 번의 역전파
-    for i, (inputs, attention_mask, labels) in enumerate(data_loader):
-        outputs, _ = model(inputs, attention_mask)
-        loss = criterion(outputs, labels)
-        loss = loss / accumulation_steps
-        loss.backward()
+if 'TRAIN' in option:
+    # Training loop
+    num_epochs = 20
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+        running_corrects = 0
+        total_samples = 0
+        accumulation_steps = 8  # 4개의 미니 배치마다 한 번의 역전파
+        for i, (inputs, attention_mask, labels) in enumerate(train_loader):
+            outputs, _ = model(inputs, attention_mask)
+            loss = criterion(outputs, labels)
+            loss = loss / accumulation_steps
+            loss.backward()
 
+            _, preds = torch.max(outputs, 1)
+            running_corrects += torch.sum(preds == labels)
+            total_samples += labels.size(0)
 
-        if (i + 1) % accumulation_steps == 0:
-            print(loss.item())
-            optimizer.step()
-            optimizer.zero_grad()
-        running_loss += loss.item()
-    avg_loss = running_loss / len(data_loader)
-    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+            if (i + 1) % accumulation_steps == 0:
+                print(loss.item())
+                optimizer.step()
+                optimizer.zero_grad()
+            running_loss += loss.item()
+        avg_loss = running_loss / len(train_loader)
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
 
-    # 모델 저장
-    torch.save({
-        'epoch': epoch + 1,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': avg_loss,
-    }, save_path)
-    print(f"Model saved after epoch {epoch + 1}")
+        # 모델 저장
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': avg_loss,
+        }, save_path)
+        print(f"Model saved after epoch {epoch + 1}")
 
-# Inference and Attention Map Visualization
-model.eval()
-with torch.no_grad():
-    for inputs, attention_mask, labels in data_loader:
-        outputs, attn_weights_list = model(inputs, attention_mask)
-        # attn_weights_list: List of attention weights from each layer
-        # Shape of each attn_weights: (batch_size, num_heads, max_length, max_length)
-        # We need to consider the attention mask when interpreting attention weights
+        # Validation phase
+        model.eval()
+        val_running_loss = 0.0
+        val_running_corrects = 0
+        val_total_samples = 0
+        with torch.no_grad():
+            for inputs, attention_mask, labels in val_loader:
+                inputs = inputs.to(device)
+                attention_mask = attention_mask.to(device)
+                labels = labels.to(device)
+                outputs, _ = model(inputs, attention_mask)
+                loss = criterion(outputs, labels)
+                val_running_loss += loss.item() * inputs.size(0)
 
-        # Stack attention weights from all layers
-        attn_weights = torch.stack(
-            attn_weights_list)  # Shape: (num_layers, batch_size, num_heads, max_length, max_length)
-        # Average over heads and layers
-        attn_weights = attn_weights.mean(dim=2).mean(dim=0)  # Shape: (batch_size, max_length, max_length)
+                # Compute accuracy
+                _, preds = torch.max(outputs, 1)
+                val_running_corrects += torch.sum(preds == labels)
+                val_total_samples += labels.size(0)
+        val_epoch_loss = val_running_loss / val_total_samples
+        val_epoch_acc = val_running_corrects.double() / val_total_samples
+        print(f"Validation Loss: {val_epoch_loss:.4f}")
+        print(f"Validation Accuracy: {val_epoch_acc:.4f}")
 
-        for i in range(inputs.size(0)):  # Iterate over batch
-            sample_attn = attn_weights[i]  # Shape: (max_length, max_length)
-            valid_length = attention_mask[i].sum().item()
-            N_i = int(valid_length)
-            # Extract the valid part of the attention weights
-            sample_attn_valid = sample_attn[:N_i, :N_i]  # Shape: (N_i, N_i)
-            # Aggregate attention weights over query dimension
-            attention_map = sample_attn_valid.mean(dim=0)  # Shape: (N_i,)
-            # Normalize attention map
-            attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-8)
-            # Convert to numpy for visualization
-            attention_map_np = attention_map.cpu().numpy()
-            # Here you can visualize the attention map
-            # For example:
-            # import matplotlib.pyplot as plt
-            # plt.bar(range(N_i), attention_map_np)
-            # plt.xlabel('ECG Sequence Index')
-            # plt.ylabel('Attention Score')
-            # plt.title('Attention Map for Sample {}'.format(i))
-            # plt.show()
-            # This attention map shows which ECG sequences are contributing to the classification
+if 'VAL' in option:
+    model.eval()
+    val_running_loss = 0.0
+    val_running_corrects = 0
+    val_total_samples = 0
+    with torch.no_grad():
+        for inputs, attention_mask, labels in val_loader:
+            inputs = inputs.to(device)
+            attention_mask = attention_mask.to(device)
+            labels = labels.to(device)
+            outputs, _ = model(inputs, attention_mask)
+            loss = criterion(outputs, labels)
+            val_running_loss += loss.item() * inputs.size(0)
+
+            # Compute accuracy
+            _, preds = torch.max(outputs, 1)
+            val_running_corrects += torch.sum(preds == labels)
+            val_total_samples += labels.size(0)
+    val_epoch_loss = val_running_loss / val_total_samples
+    val_epoch_acc = val_running_corrects.double() / val_total_samples
+    print(f"Validation Accuracy: {val_epoch_acc:.4f}")
+
+if 'HEATMAP' in option:
+    # Inference and Attention Map Visualization
+    model.eval()
+    with torch.no_grad():
+        for inputs, attention_mask, labels in val_loader:
+            outputs, attn_weights_list = model(inputs, attention_mask)
+            # attn_weights_list: List of attention weights from each layer
+            # Shape of each attn_weights: (batch_size, num_heads, max_length, max_length)
+            # We need to consider the attention mask when interpreting attention weights
+
+            # Stack attention weights from all layers
+            attn_weights = torch.stack(
+                attn_weights_list)  # Shape: (num_layers, batch_size, num_heads, max_length, max_length)
+            # Average over heads and layers
+            # attn_weights = attn_weights.mean(dim=2).mean(dim=0)  # Shape: (batch_size, max_length, max_length)
+            attn_weights = attn_weights.mean(dim=0)  # Shape: (batch_size, max_length, max_length)
+
+            for i in range(inputs.size(0)):  # Iterate over batch
+                sample_attn = attn_weights[i]  # Shape: (max_length, max_length)
+                valid_length = attention_mask[i].sum().item()
+                N_i = int(valid_length)
+                # Extract the valid part of the attention weights
+                sample_attn_valid = sample_attn[:N_i, :N_i]  # Shape: (N_i, N_i)
+                # Aggregate attention weights over query dimension
+                attention_map = sample_attn_valid.mean(dim=0)  # Shape: (N_i,)
+                # Normalize attention map
+                attention_map = (attention_map - attention_map.min()) / (attention_map.max() - attention_map.min() + 1e-8)
+                # Convert to numpy for visualization
+                attention_map_np = attention_map.cpu().numpy()
+                # Here you can visualize the attention map
+                # For example:
+
+                import matplotlib.pyplot as plt
+                plt.bar(range(N_i), attention_map_np)
+                plt.xlabel('ECG Sequence Index')
+                plt.ylabel('Attention Score')
+                plt.title('Attention Map for Sample {} with label {}'.format(i,labels[i].cpu().numpy()))
+                plt.show()
+                # This attention map shows which ECG sequences are contributing to the classification
 
