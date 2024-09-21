@@ -11,7 +11,8 @@ from pyts.image import RecurrencePlot, GramianAngularField
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 # 혼합 정밀도 학습을 위한 라이브러리
-from torch.cuda.amp import autocast, GradScaler
+# 혼합 정밀도 비활성화로 인해 제거
+# from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models
 
@@ -24,7 +25,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 OFFSET = None
 DEBUG = False
-LEARNING_RATE = 0.001
+LEARNING_RATE = 5e-4  # 낮춘 학습률
 PLOT = False
 dtype = 1
 CLUSTERING = True
@@ -74,7 +75,7 @@ class ECGDataset(Dataset):
             'RP': RecurrencePlot(),
             'GASF': GramianAngularField(method='summation'),
             'GADF': GramianAngularField(method='difference'),
-            'MTF': MarkovTransitionField(),
+            'MTF': MarkovTransitionField(n_bins=4),
         }
 
     def __len__(self):
@@ -101,8 +102,8 @@ class ECGDataset(Dataset):
                 signal_transformed.append(img)
             # Stack the four transformed images along the channel dimension
             signal_transformed = np.stack(signal_transformed, axis=0)  # Shape: (4, image_size, image_size)
-            signal_transformed = (signal_transformed - np.mean(signal_transformed)) / (
-                        np.std(signal_transformed) + 1e-8)
+            # 추가 정규화
+            signal_transformed = (signal_transformed - np.mean(signal_transformed)) / (np.std(signal_transformed) + 1e-8)
             transformed_signals.append(signal_transformed)
 
         # transformed_signals is a list of length N_i, each element of shape (4, image_size, image_size)
@@ -171,7 +172,6 @@ class RelativePositionalEncoding(nn.Module):
         # Initialize relative positional embeddings with small values
         self.rel_pos_table = nn.Parameter(torch.randn(max_len * 2 - 1, d_model) * 0.1)  # 작은 표준편차로 초기화
 
-
     def forward(self, length):
         """
         Generate relative positional embeddings for a given sequence length.
@@ -232,6 +232,7 @@ class FeatureExtractor(nn.Module):
 # ============================================
 # Transformer Model with Advanced Attention
 # ============================================
+
 class CustomMultiheadAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, dropout=0.1, bias=True, max_relative_position=128, batch_first=False):
         super(CustomMultiheadAttention, self).__init__()
@@ -253,6 +254,9 @@ class CustomMultiheadAttention(nn.Module):
 
         # Relative positional encoding
         self.relative_pos_embedding = RelativePositionalEncoding(self.head_dim, max_len=max_relative_position)
+
+        # Initialize attention_weights
+        self.attn_weights = None
 
     def forward(self, query, key, value, attn_mask=None, key_padding_mask=None, is_causal=None):
         """
@@ -312,6 +316,9 @@ class CustomMultiheadAttention(nn.Module):
         attn_weights = torch.softmax(attn_scores, dim=-1)  # (batch_size, num_heads, seq_length, seq_length)
         attn_weights = torch.dropout(attn_weights, p=self.dropout, train=self.training)
 
+        # Store attention weights for visualization
+        self.attn_weights = attn_weights.detach().cpu()
+
         attn_output = torch.matmul(attn_weights, v)  # (batch_size, num_heads, seq_length, head_dim)
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_length, self.embed_dim)  # (batch_size, seq_length, embed_dim)
 
@@ -324,11 +331,11 @@ class CustomMultiheadAttention(nn.Module):
         return attn_output
 
 
-
 class CustomTransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, attn_weights_list=None):
         super(CustomTransformerEncoderLayer, self).__init__()
         self.self_attn = CustomMultiheadAttention(d_model, nhead, dropout=dropout)
+        self.attn_weights_list = attn_weights_list
 
         # Position-wise Feedforward Network
         self.linear1 = nn.Linear(d_model, dim_feedforward)
@@ -355,6 +362,11 @@ class CustomTransformerEncoderLayer(nn.Module):
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
         src = src + self.dropout2(src2)
         src = self.norm2(src)
+
+        # Append attention weights to the list if provided
+        if self.attn_weights_list is not None and self.self_attn.attn_weights is not None:
+            self.attn_weights_list.append(self.self_attn.attn_weights)
+
         return src
 
 
@@ -365,9 +377,16 @@ class ECGTransformer(nn.Module):
         self.feature_norm = nn.LayerNorm(d_model)  # LayerNorm 추가
         self.d_model = d_model
 
+        # List to store attention weights from each layer
+        self.attention_weights = []
+
         # Define transformer encoder
-        encoder_layer = CustomTransformerEncoderLayer(d_model, nhead, dim_feedforward=512, dropout=dropout_rate)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        encoder_layers = [
+            CustomTransformerEncoderLayer(d_model, nhead, dim_feedforward=512, dropout=dropout_rate,
+                                         attn_weights_list=self.attention_weights)
+            for _ in range(num_layers)
+        ]
+        self.transformer_encoder = nn.Sequential(*encoder_layers)
 
         self.fc = nn.Linear(self.d_model, num_classes)
 
@@ -403,17 +422,23 @@ class ECGTransformer(nn.Module):
         # Create key padding mask: True for positions that are to be masked
         src_key_padding_mask = ~attention_mask  # Shape: (batch_size, max_length)
 
+        # Clear previous attention weights
+        self.attention_weights = []
+
         # Pass through transformer encoder
-        transformer_output = self.transformer_encoder(x,
-                                                      src_key_padding_mask=src_key_padding_mask)  # Shape: (max_length, batch_size, d_model)
+        for layer in self.transformer_encoder:
+            x = layer(x, src_key_padding_mask=src_key_padding_mask)
+
+        # transformer_encoder is now a Sequential of layers
+        # Each layer has appended its attention weights to self.attention_weights
 
         # Check for NaN or Inf in transformer output
-        if torch.isnan(transformer_output).any() or torch.isinf(transformer_output).any():
+        if torch.isnan(x).any() or torch.isinf(x).any():
             print("Transformer Error.")
             raise ValueError("Transformer produced NaN or Inf.")
 
         # Transpose back to (batch_size, max_length, d_model)
-        transformer_output = transformer_output.transpose(0, 1)  # Shape: (batch_size, max_length, d_model)
+        transformer_output = x.transpose(0, 1)  # Shape: (batch_size, max_length, d_model)
         # print(
         #     f"Transformer Output: min={transformer_output.min().item()}, max={transformer_output.max().item()}, mean={transformer_output.mean().item()}")
 
@@ -454,6 +479,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, device, 
 
         try:
             if scaler:
+                from torch.cuda.amp import autocast
                 with autocast():
                     outputs = model(inputs, attention_mask)
                     loss = criterion(outputs, labels)
@@ -500,6 +526,9 @@ def validate(model, dataloader, criterion, device):
     val_running_corrects = 0
     val_total_samples = 0
 
+    # To store attention weights for visualization
+    all_attention_weights = []
+
     with torch.no_grad():
         for inputs, attention_mask, labels in dataloader:
             inputs = inputs.to(device)
@@ -518,12 +547,38 @@ def validate(model, dataloader, criterion, device):
             val_running_corrects += torch.sum(preds == labels)
             val_total_samples += labels.size(0)
 
+            # Collect attention weights
+            # Assuming model.attention_weights is a list of tensors from each layer
+            # Each tensor has shape (batch_size, num_heads, seq_length, seq_length)
+            for attn in model.attention_weights:
+                all_attention_weights.append(attn)
+
             # Memory management
             del inputs, attention_mask, labels, outputs, loss
             torch.cuda.empty_cache()
 
     val_epoch_loss = val_running_loss / val_total_samples
     val_epoch_acc = val_running_corrects.double() / val_total_samples
+
+    # Visualization: Plot attention weights for the first sample in the last batch
+    if all_attention_weights:
+        # Get the first attention weights from the first layer
+        # Shape: (batch_size, num_heads, seq_length, seq_length)
+        first_layer_attn = all_attention_weights[0]
+
+        # Select the first sample in the batch
+        sample_attn = first_layer_attn[0]  # Shape: (num_heads, seq_length, seq_length)
+
+        # Select the first head
+        first_head_attn = sample_attn[0].numpy()  # Shape: (seq_length, seq_length)
+
+        plt.figure(figsize=(8, 6))
+        plt.imshow(first_head_attn, cmap='viridis')
+        plt.title("Attention Weights - Layer 1, Head 1")
+        plt.xlabel("Key Position")
+        plt.ylabel("Query Position")
+        plt.colorbar()
+        plt.show()
 
     return val_epoch_loss, val_epoch_acc.item()
 
@@ -539,7 +594,7 @@ def main():
 
     # Hyperparameters
     num_epochs = 20
-    learning_rate = 1e-4
+    learning_rate = 3e-4  # 낮춘 학습률
     batch_size = 32
     num_layers = 2
     nhead = 8
@@ -593,7 +648,7 @@ def main():
         batch_size=batch_size,
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=0
+        num_workers=0  # 변경: 4 -> 0
     )
 
     val_loader = DataLoader(
@@ -601,7 +656,7 @@ def main():
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=0
+        num_workers=0  # 변경: 4 -> 0
     )
 
     # ============================================
@@ -642,8 +697,8 @@ def main():
     # Define learning rate scheduler
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    # Initialize GradScaler for mixed precision training
-    scaler = GradScaler()
+    # 혼합 정밀도 비활성화로 인해 제거
+    # scaler = GradScaler()
 
     # ============================================
     # Training Loop with Early Stopping
@@ -665,7 +720,7 @@ def main():
             optimizer,
             scheduler,
             device,
-            scaler,
+            scaler=None  # scaler 인자 전달 없음
         )
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}")
 
@@ -738,6 +793,21 @@ def main():
                 plt.axis('off')
             plt.suptitle(f"True Label: {labels_np[sample_idx]}, Predicted: {preds_np[sample_idx]}")
             plt.show()
+
+            # Visualize attention weights
+            # Assuming model.attention_weights is a list of tensors from each layer
+            # Each tensor has shape (batch_size, num_heads, seq_length, seq_length)
+            for layer_idx, attn in enumerate(model.attention_weights):
+                # Select the first head
+                first_head_attn = attn[sample_idx, 0].numpy()  # Shape: (seq_length, seq_length)
+
+                plt.figure(figsize=(6, 5))
+                plt.imshow(first_head_attn, cmap='viridis')
+                plt.title(f"Attention Weights - Layer {layer_idx + 1}, Head 1")
+                plt.xlabel("Key Position")
+                plt.ylabel("Query Position")
+                plt.colorbar()
+                plt.show()
 
             break  # Plot only one batch
 
