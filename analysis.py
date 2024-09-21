@@ -120,12 +120,23 @@ def load_and_preprocess_data(offset, n_data, dtype, debug,clustering =False, plo
         all_files.extend(file_list)  # 모든 파일을 리스트에 추가
 
     # 병렬로 파일 로드
+    # if all_files:
+    #     loaded_data = Parallel(n_jobs=-1)(delayed(load_json_file)(file_name) for file_name in all_files)
+    #
+    #     # 병렬 로드된 데이터를 하나의 리스트로 확장
+    #     for data in loaded_data:
+    #         preprocessed_dataset.extend(data)
+    #     return preprocessed_dataset
     if all_files:
-        loaded_data = Parallel(n_jobs=-1)(delayed(load_json_file)(file_name) for file_name in all_files)
+        loaded_data = []
+        for file_name in all_files:
+            data = load_json_file(file_name)
+            loaded_data.append(data)
 
-        # 병렬 로드된 데이터를 하나의 리스트로 확장
+        # 데이터를 하나의 리스트로 확장
         for data in loaded_data:
             preprocessed_dataset.extend(data)
+
         return preprocessed_dataset
 
     # return None

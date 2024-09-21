@@ -13,6 +13,7 @@ from ecg_cluster import load_and_preprocess_ecg_data
 import seaborn as sns
 import matplotlib.pyplot as plt
 import warnings
+import optuna
 
 # 경고 메시지 숨기기
 warnings.filterwarnings("ignore")
@@ -27,8 +28,8 @@ dtype = 1
 CLUSTERING = True
 
 input_dim = 1  # ECG 시퀀스의 단일 차원 입력
-d_model = 64  # Transformer 모델 차원
-nhead = 8  # Multi-head attention
+d_model = 32  # Transformer 모델 차원
+nhead = 4  # Multi-head attention
 num_layers = 4  # Transformer 레이어 수
 dim_feedforward = 128  # FFN의 차원
 seq_length = 300  # ECG 시퀀스 길이
@@ -37,18 +38,32 @@ num_epochs = 10
 # num_classes = 4  # a, b, c, d에 대한 4개 클래스
 
 # option = ['TRAIN', 'VAL', 'HEATMAP']
-option = ['VAL']
+option = ['TRAIN']
 
+
+def augment_ecg_signal(signal):
+    # Gaussian noise addition
+    noise = np.random.normal(0, 0.01, signal.shape)
+    augmented_signal = signal + noise
+    return augmented_signal
+
+def normalize_signal(signal):
+    # Signal normalization to [0,1]
+    min_val = np.min(signal)
+    max_val = np.max(signal)
+    normalized_signal = (signal - min_val) / (max_val - min_val + 1e-8)
+    return normalized_signal
 
 # Define the Dataset class
 class ECGDataset(Dataset):
-    def __init__(self, data, labels):
+    def __init__(self, data, labels, augment = False):
         """
         data: list of numpy arrays, each of shape (N_i, 300)
         labels: numpy array of shape (Batch,)
         """
         self.data = data  # List of arrays of shape (N_i, 300)
         self.labels = labels  # Shape: (Batch,)
+        self.augment = augment
 
         # Initialize the transformers
         self.transformers = {
@@ -66,6 +81,12 @@ class ECGDataset(Dataset):
         label = self.labels[idx]
 
         transformed_signals = []
+
+        if self.augment:
+            # Apply augmentation to each signal
+            signals = [augment_ecg_signal(signal) for signal in signals]
+            # Optionally apply other augmentations
+            signals = [normalize_signal(signal) for signal in signals]
 
         # Apply transformations to each of the N_i signals
         for signal in signals:  # Iterate over N_i signals
@@ -158,19 +179,22 @@ class SpatialAttention(nn.Module):
 class FeatureExtractor(nn.Module):
     def __init__(self):
         super(FeatureExtractor, self).__init__()
-        self.conv1 = DepthwiseSeparableConv(4, 32, kernel_size=3, padding=1)
+        self.conv1 = DepthwiseSeparableConv(4, 16, kernel_size=3, padding=1)
         self.attention1 = SpatialAttention()
-        self.conv2 = DepthwiseSeparableConv(32, 64, kernel_size=3, padding=1)
+        self.conv2 = DepthwiseSeparableConv(16, 32, kernel_size=3, padding=1)
         self.attention2 = SpatialAttention()
         self.pool = nn.AdaptiveAvgPool2d((8, 8))
+        self.dropout = nn.Dropout2d(0.3)
 
     def forward(self, x):
         x = self.conv1(x)
         x = self.attention1(x)
         x = nn.ReLU()(x)
+        x = self.dropout(x)
         x = self.conv2(x)
         x = self.attention2(x)
         x = nn.ReLU()(x)
+        x = self.dropout(x)
         x = self.pool(x)
         return x  # Output shape: (batch_size, channels, 16, 16)
 
@@ -252,6 +276,24 @@ class ECGTransformer(nn.Module):
         logits = self.fc(avg_output)  # Shape: (batch_size, num_classes)
         return logits, attn_weights_list
 
+# Focal Loss 정의
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = nn.CrossEntropyLoss(weight=self.alpha, reduction='none')(inputs, targets)
+        pt = torch.exp(-ce_loss)
+        focal_loss = (1 - pt) ** self.gamma * ce_loss
+
+        if self.reduction == 'mean':
+            return torch.mean(focal_loss)
+        else:
+            return focal_loss
+
 
 # Example of preparing data and labels
 # Replace this with your actual data loading mechanism
@@ -285,6 +327,12 @@ from sklearn.model_selection import train_test_split
 train_data, val_data, train_labels, val_labels = train_test_split(
     data, labels, test_size=0.2, random_state=42)
 
+from sklearn.utils.class_weight import compute_class_weight
+# 클래스 가중치 계산
+class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
+class_weights = torch.tensor(class_weights, dtype=torch.float32)
+class_weights = class_weights.to(device)
+
 # Create dataset and DataLoader
 train_dataset = ECGDataset(train_data, train_labels)
 val_dataset = ECGDataset(val_data, val_labels)
@@ -295,11 +343,17 @@ val_loader  = DataLoader(val_dataset, batch_size=Batch, shuffle=True, collate_fn
 # Initialize the model, loss function, and optimizer
 num_classes = len(label_to_idx_A)  # Adjust based on your classification task
 model = ECGTransformer(num_classes=num_classes).to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+# Focal Loss 사용
+criterion = FocalLoss(alpha=class_weights, gamma=2)
+
+# AdamW 옵티마이저 사용
+optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5)
+
+# 학습률 스케줄러
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
 # Training loop with model saving after every epoch
-save_path = './ecg_transformer_model.pth'  # 모델을 저장할 경로
+save_path = 'ecg_transformer_model.pth'  # 모델을 저장할 경로
 
 if os.path.exists(save_path):
     print(f"Loading model from {save_path}")
@@ -316,6 +370,10 @@ else:
 if 'TRAIN' in option:
     # Training loop
     num_epochs = 20
+    best_val_loss = float('inf')
+    patience = 5
+    trigger_times = 0
+
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
@@ -333,12 +391,12 @@ if 'TRAIN' in option:
             total_samples += labels.size(0)
 
             if (i + 1) % accumulation_steps == 0:
-                print(loss.item())
+                # print(loss.item())
                 optimizer.step()
                 optimizer.zero_grad()
             running_loss += loss.item()
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        epoch_acc = running_corrects.double() / total_samples
 
         # 모델 저장
         torch.save({
@@ -369,8 +427,25 @@ if 'TRAIN' in option:
                 val_total_samples += labels.size(0)
         val_epoch_loss = val_running_loss / val_total_samples
         val_epoch_acc = val_running_corrects.double() / val_total_samples
-        print(f"Validation Loss: {val_epoch_loss:.4f}")
-        print(f"Validation Accuracy: {val_epoch_acc:.4f}")
+
+        # 학습률 스케줄러 업데이트
+        scheduler.step()
+
+        print(f"Epoch {epoch + 1}/{num_epochs}, "
+              f"Train Loss: {avg_loss:.4f}, Train Acc: {epoch_acc:.4f}, "
+              f"Val Loss: {val_epoch_loss:.4f}, Val Acc: {val_epoch_acc:.4f}")
+
+        # 조기 종료 적용
+        if val_epoch_loss < best_val_loss:
+            best_val_loss = val_epoch_loss
+            trigger_times = 0
+            # 최적 모델 저장
+            torch.save(model.state_dict(), 'best_model.pth')
+        else:
+            trigger_times += 1
+            if trigger_times >= patience:
+                print('Early stopping!')
+                break
 
 if 'VAL' in option:
     model.eval()
