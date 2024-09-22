@@ -151,7 +151,7 @@ def load_and_preprocess_ecg_data(offset, n_data, dtype, debug, clustering, plot)
 
     preprocessed_dataset = load_and_preprocess_data(offset, n_data, dtype, debug, clustering, plot)
     for item in preprocessed_dataset:
-        item['data'] = np.asarray(segment_ecg(item['data']))[:, :, 0]  # ECG 데이터를 분할
+        item['data'] = np.asarray(item['data'])[:,0]#segment_ecg(item['data']))[:, :, 0]  # ECG 데이터를 분할
     return preprocessed_dataset
 
 
