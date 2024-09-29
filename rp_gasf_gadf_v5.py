@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-#Relational Transformer
+# Relational Transformer for ECG Classification without Data Augmentation
 import warnings
 import logging
 import matplotlib.pyplot as plt
@@ -11,11 +11,12 @@ import torch.nn.functional as F
 from pyts.image import MarkovTransitionField, RecurrencePlot, GramianAngularField
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torchvision import models
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-from ecg_cluster import load_and_preprocess_ecg_data
+from sklearn.metrics import precision_recall_fscore_support
+from ecg_cluster import load_and_preprocess_ecg_data  # 사용자 정의 모듈
 import heartpy as hp
+import random
 
 # 로깅 설정
 logging.basicConfig(
@@ -38,9 +39,9 @@ logging.info(f"Using device: {device}")
 LEARNING_RATE = 3e-4
 BATCH_SIZE = 32
 NUM_EPOCHS = 100
-NUM_LAYERS = 4
-NHEAD = 8
-D_MODEL = 256
+NUM_LAYERS = 2
+NHEAD = 8  # d_model=1024일 때 nhead=8
+D_MODEL = 1024  # 이미지 특징(768) + 원시 신호 특징(256)
 DROPOUT_RATE = 0.5
 PATIENCE = 10  # 조기 종료를 위한 patience
 
@@ -50,23 +51,7 @@ dtype = 1
 CLUSTERING = True
 PLOT = False
 
-# 데이터 증강 함수
-def augment_ecg_signal(signal, max_shift=50):
-    try:
-        # 신호 시프트
-        shift = np.random.randint(-max_shift, max_shift)
-        if shift > 0:
-            shifted_signal = np.pad(signal, (shift, 0), 'constant')[:len(signal)]
-        else:
-            shifted_signal = np.pad(signal, (0, -shift), 'constant')[-shift:]
-        # 노이즈 추가
-        noise = np.random.normal(0, 0.01, shifted_signal.shape)
-        noisy_signal = shifted_signal + noise
-        return noisy_signal
-    except Exception as e:
-        logging.error(f"Error augmenting signal: {e}")
-        return None
-
+# 데이터 전처리 함수들 (데이터 증강 제외)
 def normalize_signal(signal):
     min_val = np.min(signal)
     max_val = np.max(signal)
@@ -101,7 +86,6 @@ def align_ecg_signals(signals, labels, sample_rate=300, window_size=600):
             continue  # 신호와 레이블 모두를 건너뜀
     return aligned_signals, aligned_labels
 
-
 def segment_ecg_signals(signals, window_size=300, sample_rate=100):
     # 이미 R-피크 기준으로 정렬된 신호를 사용
     # 추가적인 세그멘테이션이 필요한 경우, 예를 들어 여러 윈도우로 분할
@@ -115,16 +99,6 @@ def segment_ecg_signals(signals, window_size=300, sample_rate=100):
             continue
     return segmented_signals
 
-def augment_signals(signals, labels, max_shift=50):
-    augmented_signals = []
-    augmented_labels = []
-    for idx, (signal, label) in enumerate(zip(signals, labels)):
-        augmented_signal = augment_ecg_signal(signal, max_shift=max_shift)
-        if augmented_signal is not None:
-            augmented_signals.append(augmented_signal)
-            augmented_labels.append(label)
-    return augmented_signals, augmented_labels
-
 def normalize_signals(signals):
     normalized_signals = []
     for idx, signal in enumerate(signals):
@@ -135,7 +109,6 @@ def normalize_signals(signals):
             logging.error(f"Error normalizing signal index {idx}: {e}")
             continue
     return normalized_signals
-
 
 def transform_to_images(signals):
     # 신호를 RP, GASF, GADF, MTF 이미지로 변환
@@ -163,111 +136,236 @@ def transform_to_images(signals):
             continue
     return transformed_images
 
-# Dataset 클래스
-class ECGImageDataset(Dataset):
-    def __init__(self, images, labels):
+# 1D CNN 기반 Raw Signal Feature Extractor
+class RawSignalFeatureExtractor(nn.Module):
+    def __init__(self, input_channels=1, output_dim=256, dropout_rate=0.3):
+        super(RawSignalFeatureExtractor, self).__init__()
+        self.conv1 = nn.Conv1d(input_channels, 64, kernel_size=7, padding=3)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.relu = nn.ReLU()
+        self.pool = nn.MaxPool1d(kernel_size=2)
+
+        self.conv2 = nn.Conv1d(64, 128, kernel_size=5, padding=2)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.pool2 = nn.MaxPool1d(kernel_size=2)
+
+        self.conv3 = nn.Conv1d(128, 256, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(256)
+        self.pool3 = nn.AdaptiveMaxPool1d(1)
+
+        self.fc = nn.Linear(256, output_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x):
+        # x: (batch_size, 1, signal_length)
+        x = self.relu(self.bn1(self.conv1(x)))  # (batch_size, 64, L)
+        x = self.pool(x)                         # (batch_size, 64, L/2)
+        x = self.relu(self.bn2(self.conv2(x)))  # (batch_size, 128, L/2)
+        x = self.pool2(x)                        # (batch_size, 128, L/4)
+        x = self.relu(self.bn3(self.conv3(x)))  # (batch_size, 256, L/4)
+        x = self.pool3(x)                        # (batch_size, 256, 1)
+        x = x.view(x.size(0), -1)               # (batch_size, 256)
+        x = self.dropout(x)
+        x = self.fc(x)                           # (batch_size, output_dim)
+        return x
+
+# Attention 기반 특징 결합 모듈
+class AttentionFusion(nn.Module):
+    def __init__(self, feature_dim1, feature_dim2, fusion_dim=256):
+        super(AttentionFusion, self).__init__()
+        self.query = nn.Linear(feature_dim1, fusion_dim)
+        self.key = nn.Linear(feature_dim2, fusion_dim)
+        self.value = nn.Linear(feature_dim2, fusion_dim)
+        self.fc = nn.Linear(fusion_dim, fusion_dim)
+
+    def forward(self, feat1, feat2):
+        # feat1: (batch_size, feature_dim1)
+        # feat2: (batch_size, feature_dim2)
+        Q = self.query(feat1)  # (batch_size, fusion_dim)
+        K = self.key(feat2)    # (batch_size, fusion_dim)
+        V = self.value(feat2)  # (batch_size, fusion_dim)
+
+        attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(K.size(-1))
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, V)
+        out = self.fc(attn_output)
+        return out
+
+# 수정된 Feature Extractor 클래스에 RawSignalFeatureExtractor 통합
+class FeatureExtractor(nn.Module):
+    def __init__(self, image_output_dim=768, raw_output_dim=256, fusion_dim=256, dropout_rate=0.3):
+        super(FeatureExtractor, self).__init__()
+        # 이미지 기반 Feature Extractor (ResNet18)
+        self.image_backbone = models.resnet18(pretrained=True)
+        self.image_backbone.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        with torch.no_grad():
+            self.image_backbone.conv1.weight[:, 3, :, :] = self.image_backbone.conv1.weight[:, :3, :, :].mean(dim=1)
+
+        # Freeze early layers
+        for name, param in self.image_backbone.named_parameters():
+            if "layer3" in name or "layer4" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        # Extract features from layer2 and layer4
+        self.layer2 = self.image_backbone.layer2
+        self.layer4 = self.image_backbone.layer4
+
+        # Pooling layers
+        self.pool_layer2 = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_layer4 = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Image feature combination
+        self.image_fc = nn.Linear(128 + 512, image_output_dim)  # layer2: 128 channels (ResNet18), layer4: 512 channels
+
+        self.image_dropout = nn.Dropout(dropout_rate)
+
+        # Raw signal Feature Extractor
+        self.raw_signal_extractor = RawSignalFeatureExtractor(input_channels=1, output_dim=raw_output_dim, dropout_rate=dropout_rate)
+
+        # Attention-based Fusion
+        self.fusion = AttentionFusion(feature_dim1=image_output_dim, feature_dim2=raw_output_dim, fusion_dim=fusion_dim)
+
+        # Combined Feature
+        self.combined_fc = nn.Linear(fusion_dim, fusion_dim)  # fusion_dim
+        self.combined_dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, image, raw_signal):
+        # 이미지 처리
+        x = self.image_backbone.conv1(image)
+        x = self.image_backbone.bn1(x)
+        x = self.image_backbone.relu(x)
+        x = self.image_backbone.maxpool(x)
+
+        x = self.image_backbone.layer1(x)
+        x = self.layer2(x)  # Output of layer2
+        feat_local = self.pool_layer2(x).view(x.size(0), -1)  # Shape: (batch_size, 128)
+
+        x = self.image_backbone.layer3(x)
+        x = self.layer4(x)  # Output of layer4
+        feat_global = self.pool_layer4(x).view(x.size(0), -1)  # Shape: (batch_size, 512)
+
+        # Concatenate image features
+        image_combined = torch.cat((feat_local, feat_global), dim=1)  # Shape: (batch_size, 640)
+        image_combined = self.image_dropout(image_combined)
+        image_combined = self.image_fc(image_combined)  # Shape: (batch_size, 768)
+
+        # 원시 신호 처리
+        raw_features = self.raw_signal_extractor(raw_signal)  # Shape: (batch_size, 256)
+
+        # 특징 결합 via Attention-based Fusion
+        fused_features = self.fusion(image_combined, raw_features)  # Shape: (batch_size, 256)
+
+        # Combined Feature
+        combined = self.combined_dropout(fused_features)
+        combined = self.combined_fc(combined)  # Shape: (batch_size, 256)
+        return combined
+
+# Residual Connections 적용된 Transformer 블록
+class TransformerEncoderLayerWithResidual(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
+        super(TransformerEncoderLayerWithResidual, self).__init__()
+        self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # Self-attention with residual connection
+        src2, _ = self.self_attn(src, src, src, attn_mask=src_mask,
+                                 key_padding_mask=src_key_padding_mask)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        # Feedforward with residual connection
+        src2 = self.linear2(self.dropout2(F.relu(self.linear1(src))))
+        src = src + src2
+        src = self.norm2(src)
+        return src
+
+# Transformer 모델 정의
+class ECGTransformerWithResidual(nn.Module):
+    def __init__(self, num_classes, d_model=256, nhead=8, num_layers=2, dropout_rate=0.3):
+        super(ECGTransformerWithResidual, self).__init__()
+        self.feature_extractor = FeatureExtractor(image_output_dim=768, raw_output_dim=256, fusion_dim=256, dropout_rate=dropout_rate)
+        self.feature_norm = nn.LayerNorm(d_model)
+        self.d_model = d_model
+
+        self.transformer_encoder = nn.ModuleList([
+            TransformerEncoderLayerWithResidual(d_model, nhead, dim_feedforward=1024, dropout=dropout_rate)
+            for _ in range(num_layers)
+        ])
+        self.fc = nn.Linear(d_model, num_classes)
+
+    def forward(self, images, raw_signals, attention_mask):
+        """
+        images: (batch_size, max_length, 4, H, W)
+        raw_signals: (batch_size, max_length, 1, signal_length)
+        attention_mask: (batch_size, max_length)
+        """
+        batch_size, max_length, C, H, W = images.size()
+        raw_signals = raw_signals.view(batch_size * max_length, 1, -1)  # (batch_size * max_length, 1, signal_length)
+        images = images.view(batch_size * max_length, C, H, W)          # (batch_size * max_length, C, H, W)
+
+        # 특징 추출
+        features = self.feature_extractor(images, raw_signals)           # (batch_size * max_length, 256)
+        features = self.feature_norm(features)
+        features = features.view(batch_size, max_length, self.d_model)  # (batch_size, max_length, d_model)
+
+        # Transformer expects input as (sequence_length, batch_size, d_model)
+        features = features.permute(1, 0, 2)  # (max_length, batch_size, d_model)
+
+        # Transformer 인코더 통과
+        for layer in self.transformer_encoder:
+            features = layer(features, src_key_padding_mask=~attention_mask)
+
+        # 출력의 평균을 취함 (패딩을 고려)
+        features = features.permute(1, 0, 2)  # (batch_size, max_length, d_model)
+        attention_mask = attention_mask.unsqueeze(-1)  # (batch_size, max_length, 1)
+        masked_output = features * attention_mask  # (batch_size, max_length, d_model)
+        sum_output = masked_output.sum(dim=1)     # (batch_size, d_model)
+        valid_lengths = attention_mask.sum(dim=1) + 1e-8  # (batch_size, 1)
+        avg_output = sum_output / valid_lengths     # (batch_size, d_model)
+        logits = self.fc(avg_output)               # (batch_size, num_classes)
+        return logits
+
+# Dataset 클래스 수정: 이미지와 원시 신호 모두 반환
+class ECGCombinedDataset(Dataset):
+    def __init__(self, images, raw_signals, labels, augment=False):
         """
         images: list of numpy arrays with shape (4, H, W)
+        raw_signals: list of numpy arrays with shape (1, signal_length)
         labels: list or array of labels
+        augment: whether to apply additional image augmentations (현재 사용하지 않음)
         """
         self.images = images
+        self.raw_signals = raw_signals
         self.labels = labels
+        self.augment = augment
 
     def __len__(self):
         return len(self.images)
 
     def __getitem__(self, idx):
-        image = self.images[idx]  # (4, H, W)
+        image = self.images[idx]          # (4, H, W)
+        raw_signal = self.raw_signals[idx]  # (1, signal_length)
         label = self.labels[idx]
+
+        # # 추가적인 이미지 증강 (현재 비활성화)
+        # if self.augment:
+        #     if random.random() > 0.5:
+        #         image = np.flip(image, axis=2)  # W 축을 기준으로 뒤집기
+
         # 텐서로 변환
         image = torch.tensor(image, dtype=torch.float32)
+        raw_signal = torch.tensor(raw_signal, dtype=torch.float32)
         label = torch.tensor(label, dtype=torch.long)
-        return image, label
+        return image, raw_signal, label
 
-class ECGDataset(Dataset):
-    def __init__(self, data, labels, augment=False):
-        self.data = data
-        self.labels = labels
-        self.augment = augment
-
-        self.transformers = {
-            'RP': RecurrencePlot(),
-            'GASF': GramianAngularField(method='summation'),
-            'GADF': GramianAngularField(method='difference'),
-            'MTF': MarkovTransitionField(n_bins=4),
-        }
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        try:
-            signals = self.data[idx]  # Shape: (N_i, 300)
-            label = self.labels[idx]
-
-            if self.augment:
-                signals = [augment_ecg_signal(signal) for signal in signals]
-                signals = [normalize_signal(signal) for signal in signals]
-
-            transformed_signals = []
-            for signal in signals:
-                transformed = []
-                for key in ['RP', 'GASF', 'GADF', 'MTF']:
-                    transformer = self.transformers[key]
-                    img = transformer.transform(signal.reshape(1, -1))[0]
-                    transformed.append(img)
-                transformed = np.stack(transformed, axis=0)
-                transformed = (transformed - np.mean(transformed)) / (np.std(transformed) + 1e-8)
-                transformed_signals.append(transformed)
-
-            transformed_signals = [torch.tensor(ts, dtype=torch.float32) for ts in transformed_signals]
-            label = torch.tensor(label, dtype=torch.long)
-
-            return transformed_signals, label
-        except Exception as e:
-            logging.error(f"Error in __getitem__ for index {idx}: {e}")
-            # 예외를 다시 발생시켜 DataLoader가 이를 처리하게 합니다.
-            raise e
-
-# 커스텀 collate_fn
-def collate_fn(batch):
-    labels = []
-    all_transformed_signals = []
-    lengths = []
-    for transformed_signals, label in batch:
-        if transformed_signals is None:
-            continue  # 에러가 발생한 샘플은 건너뜁니다.
-        labels.append(label)
-        all_transformed_signals.append(transformed_signals)
-        lengths.append(len(transformed_signals))
-
-    if not all_transformed_signals:
-        return None, None, None
-
-    max_length = max(lengths)
-
-    padded_sequences = []
-    attention_masks = []
-    for signals in all_transformed_signals:
-        N_i = len(signals)
-        pad_size = max_length - N_i
-        if pad_size > 0:
-            pad = [torch.zeros_like(signals[0]) for _ in range(pad_size)]
-            signals = signals + pad
-        padded_sequences.append(torch.stack(signals))  # Shape: (max_length, 4, H, W)
-        attention_mask = [1] * N_i + [0] * pad_size
-        attention_masks.append(attention_mask)
-
-    padded_sequences = torch.stack(padded_sequences)  # Shape: (batch_size, max_length, 4, H, W)
-    attention_masks = torch.tensor(attention_masks, dtype=torch.bool)  # Shape: (batch_size, max_length)
-    labels = torch.stack(labels)  # Shape: (batch_size,)
-
-    # 텐서를 GPU로 이동시키지 않습니다. 학습 루프에서 이동시킵니다.
-    return padded_sequences, attention_masks, labels
-
-
-
-# Label Smoothing 적용된 CrossEntropyLoss
+# Label Smoothing 적용된 CrossEntropyLoss (선택 사항)
 class LabelSmoothingLoss(nn.Module):
     def __init__(self, smoothing=0.1):
         super(LabelSmoothingLoss, self).__init__()
@@ -278,205 +376,6 @@ class LabelSmoothingLoss(nn.Module):
         smooth_label = torch.full_like(pred, self.smoothing / (pred.size(1) - 1))
         smooth_label.scatter_(1, target.unsqueeze(1), confidence)
         return torch.mean(torch.sum(-smooth_label * F.log_softmax(pred, dim=1), dim=1))
-
-# Relational Attention 적용
-class RelationalAttention(nn.Module):
-    def __init__(self, d_model, nhead, dropout=0.1):
-        super(RelationalAttention, self).__init__()
-        self.nhead = nhead
-        self.d_model = d_model // nhead
-        self.qkv_proj = nn.Linear(d_model, d_model * 3)
-        self.out_proj = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.scale = np.sqrt(self.d_model)
-
-    def forward(self, x):
-        batch_size, seq_length, d_model = x.size()
-        qkv = self.qkv_proj(x).reshape(batch_size, seq_length, self.nhead, 3 * self.d_model).transpose(1, 2)
-        q, k, v = qkv.chunk(3, dim=-1)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        attn_output = torch.matmul(attn_weights, v).transpose(1, 2).reshape(batch_size, seq_length, d_model)
-        return self.out_proj(attn_output)
-
-# Residual Connections 적용된 Transformer 블록
-class TransformerEncoderLayerWithResidual(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=512, dropout=0.1):
-        super(TransformerEncoderLayerWithResidual, self).__init__()
-        self.self_attn = RelationalAttention(d_model, nhead, dropout)
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-
-    def forward(self, src):
-        # Self-attention with residual connection
-        src2 = self.self_attn(src)
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
-
-        # Feedforward with residual connection
-        src2 = self.linear2(self.dropout2(F.relu(self.linear1(src))))
-        src = src + src2
-        src = self.norm2(src)
-        return src
-
-# Feature Extractor 정의
-class FeatureExtractor(nn.Module):
-    def __init__(self, output_dim=256, dropout_rate=0.3):
-        super(FeatureExtractor, self).__init__()
-        self.backbone = models.resnet34(pretrained=True)
-        self.backbone.conv1 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        with torch.no_grad():
-            self.backbone.conv1.weight[:, 3, :, :] = self.backbone.conv1.weight[:, :3, :, :].mean(dim=1)
-        for name, param in self.backbone.named_parameters():
-            if "layer3" in name or "layer4" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-        self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.dropout = nn.Dropout(dropout_rate)
-        self.fc = nn.Linear(512, output_dim)
-
-    def forward(self, x):
-        x = self.backbone(x)
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.dropout(x)
-        x = self.fc(x)
-        return x
-
-
-# Transformer 모델 정의
-# Residual Connections가 추가된 Transformer Encoder 적용
-class ECGTransformerWithResidual(nn.Module):
-    def __init__(self, num_classes, d_model=256, nhead=8, num_layers=2, dropout_rate=0.3):
-        super(ECGTransformerWithResidual, self).__init__()
-        self.feature_extractor = FeatureExtractor(output_dim=d_model, dropout_rate=dropout_rate)
-        self.feature_norm = nn.LayerNorm(d_model)
-        self.d_model = d_model
-
-        self.transformer_encoder = nn.ModuleList([
-            TransformerEncoderLayerWithResidual(d_model, nhead, dim_feedforward=512, dropout=dropout_rate)
-            for _ in range(num_layers)
-        ])
-        self.fc = nn.Linear(d_model, num_classes)
-
-    def forward(self, x, attention_mask):
-        batch_size, max_length, C, H, W = x.size()
-        x = x.view(batch_size * max_length, C, H, W)
-        x = self.feature_extractor(x)
-        x = self.feature_norm(x)
-        x = x.view(batch_size, max_length, self.d_model)
-
-        for layer in self.transformer_encoder:
-            x = layer(x)
-
-        attention_mask = attention_mask.unsqueeze(-1)
-        masked_output = x * attention_mask
-        sum_output = masked_output.sum(dim=1)
-        valid_lengths = attention_mask.sum(dim=1) + 1e-8
-        avg_output = sum_output / valid_lengths
-        logits = self.fc(avg_output)
-        return logits
-
-# 학습 함수
-# 학습 함수
-# 학습 함수 내에서 attention_mask를 수정하는 부분
-def train_one_epoch(model, dataloader, criterion, optimizer, device):
-    model.train()
-    running_loss = 0.0
-    running_corrects = 0
-    total_samples = 0
-
-    for batch_idx, batch in enumerate(dataloader):
-        inputs, labels = batch
-        inputs = inputs.unsqueeze(1)  # (batch_size, 1, ...)
-        attention_mask = torch.ones(inputs.size(0), inputs.size(1), dtype=torch.bool)  # (batch_size, seq_length)
-
-        # 텐서를 올바르게 확장하여 2D로 변환
-        attention_mask = attention_mask.to(device)
-        inputs = inputs.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        optimizer.zero_grad()
-
-        try:
-            outputs = model(inputs, attention_mask)
-            loss = criterion(outputs, labels)
-        except ValueError as e:
-            logging.error(f"Forward Error: {e}")
-            continue
-
-        loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        running_loss += loss.item() * inputs.size(0)
-        _, preds = torch.max(outputs, 1)
-        running_corrects += torch.sum(preds == labels).item()
-        total_samples += labels.size(0)
-
-        del inputs, attention_mask, labels, outputs, loss
-        torch.cuda.empty_cache()
-
-    epoch_loss = running_loss / total_samples
-    epoch_acc = running_corrects / total_samples
-    return epoch_loss, epoch_acc
-
-
-# 검증 함수
-def validate(model, dataloader, criterion, device):
-    model.eval()
-    val_running_loss = 0.0
-    val_running_corrects = 0
-    val_total_samples = 0
-
-    all_labels = []
-    all_preds = []
-
-    with torch.no_grad():
-        for batch in dataloader:
-            inputs, labels = batch
-            inputs = inputs.unsqueeze(1)  # (batch_size, 1, ...)
-
-            # attention_mask를 batch_size와 seq_length에 맞춰서 2D로 확장
-            attention_mask = torch.ones(inputs.size(0), inputs.size(1), dtype=torch.bool).to(device)
-
-            inputs = inputs.to(device, non_blocking=True)
-            attention_mask = attention_mask.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
-
-            try:
-                outputs = model(inputs, attention_mask)  # model에 2D src_key_padding_mask 전달
-                loss = criterion(outputs, labels)
-            except ValueError as e:
-                logging.error(f"Forward Error: {e}")
-                continue
-
-            val_running_loss += loss.item() * inputs.size(0)
-            _, preds = torch.max(outputs, 1)
-            val_running_corrects += torch.sum(preds == labels).item()
-            val_total_samples += labels.size(0)
-
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(preds.cpu().numpy())
-
-            del inputs, attention_mask, labels, outputs, loss
-            torch.cuda.empty_cache()
-
-    val_epoch_loss = val_running_loss / val_total_samples
-    val_epoch_acc = val_running_corrects / val_total_samples
-
-    precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
-    logging.info(f"Validation Loss: {val_epoch_loss:.4f}, Validation Acc: {val_epoch_acc:.4f}, "
-                 f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}")
-    return val_epoch_loss, val_epoch_acc, precision, recall, f1
-
 
 # 모델 가중치 초기화 함수
 def initialize_weights(model):
@@ -493,11 +392,94 @@ def initialize_weights(model):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
+# 학습 함수
+def train_one_epoch(model, dataloader, criterion, optimizer, device):
+    model.train()
+    running_loss = 0.0
+    running_corrects = 0
+    total_samples = 0
+
+    for batch_idx, batch in enumerate(dataloader):
+        images, raw_signals, labels = batch
+        images = images.to(device, non_blocking=True)
+        raw_signals = raw_signals.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        optimizer.zero_grad()
+
+        try:
+            attention_mask = torch.ones(images.size(0), images.size(1), dtype=torch.bool).to(device)
+            outputs = model(images, raw_signals, attention_mask)
+            loss = criterion(outputs, labels)
+        except ValueError as e:
+            logging.error(f"Forward Error: {e}")
+            continue
+
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        running_loss += loss.item() * images.size(0)
+        _, preds = torch.max(outputs, 1)
+        running_corrects += torch.sum(preds == labels).item()
+        total_samples += labels.size(0)
+
+        del images, raw_signals, labels, outputs, loss
+        torch.cuda.empty_cache()
+
+    epoch_loss = running_loss / total_samples
+    epoch_acc = running_corrects / total_samples
+    return epoch_loss, epoch_acc
+
+# 검증 함수
+def validate(model, dataloader, criterion, device):
+    model.eval()
+    val_running_loss = 0.0
+    val_running_corrects = 0
+    val_total_samples = 0
+
+    all_labels = []
+    all_preds = []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            images, raw_signals, labels = batch
+            images = images.to(device, non_blocking=True)
+            raw_signals = raw_signals.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            try:
+                attention_mask = torch.ones(images.size(0), images.size(1), dtype=torch.bool).to(device)
+                outputs = model(images, raw_signals, attention_mask)
+                loss = criterion(outputs, labels)
+            except ValueError as e:
+                logging.error(f"Forward Error: {e}")
+                continue
+
+            val_running_loss += loss.item() * images.size(0)
+            _, preds = torch.max(outputs, 1)
+            val_running_corrects += torch.sum(preds == labels).item()
+            val_total_samples += labels.size(0)
+
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(preds.cpu().numpy())
+
+            del images, raw_signals, labels, outputs, loss
+            torch.cuda.empty_cache()
+
+    val_epoch_loss = val_running_loss / val_total_samples
+    val_epoch_acc = val_running_corrects / val_total_samples
+
+    precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average='weighted')
+    logging.info(f"Validation Loss: {val_epoch_loss:.4f}, Validation Acc: {val_epoch_acc:.4f}, "
+                 f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1-Score: {f1:.4f}")
+    return val_epoch_loss, val_epoch_acc, precision, recall, f1
+
 # 메인 함수
 def main():
     # 데이터 로딩 및 전처리
     try:
-        ecg_data_A = load_and_preprocess_ecg_data(OFFSET, [2], dtype, DEBUG, CLUSTERING, PLOT)[:1500]
+        ecg_data_A = load_and_preprocess_ecg_data(OFFSET, [2], dtype, DEBUG, CLUSTERING, PLOT)[:100]
     except Exception as e:
         logging.error(f"Data loading error: {e}")
         return
@@ -519,37 +501,33 @@ def main():
     if not np.all(np.isfinite(labels)):
         logging.error("레이블에 비정상적인 값(NaN 또는 Inf)이 포함되어 있습니다.")
         return
+
     # 4. 데이터 전처리
     # 4.1. 신호 정렬
     aligned_signals, aligned_labels = align_ecg_signals(data, labels, sample_rate=100)
     logging.info(f"Aligned signals: {len(aligned_signals)}")
 
     # 4.2. 윈도우 분할 (이미 aligned_signals are window_size)
-    segmented_signals = segment_ecg_signals(aligned_signals, window_size=300, sample_rate=100)
+    segmented_signals = segment_ecg_signals(aligned_signals, window_size=50, sample_rate=100)
     logging.info(f"Segmented signals: {len(segmented_signals)}")
 
-    # 4.3. 신호 증강
-    augmented_signals, augmented_labels = augment_signals(segmented_signals, aligned_labels,  max_shift=10)
-    logging.info(f"Augmented signals: {len(augmented_signals)}")
-
-    # 4.4. 신호 정규화
-    normalized_signals = normalize_signals(augmented_signals)
+    # 4.3. 신호 정규화
+    normalized_signals = normalize_signals(segmented_signals)
     logging.info(f"Normalized signals: {len(normalized_signals)}")
 
-    # 4.5. 이미지 변환
+    # 4.4. 이미지 변환
     transformed_images = transform_to_images(normalized_signals)
     logging.info(f"Transformed images: {len(transformed_images)}")
 
-    # 4.6. 레이블 조정 (데이터 증강 후 레이블 일치)
+    # 4.5. 레이블 조정 (데이터 증강 후 레이블 일치)
     # 증강된 신호와 레이블의 개수가 일치하는지 확인
-    if len(transformed_images) != len(augmented_labels):
-        logging.error("Transformed images and augmented labels length mismatch.")
+    if len(transformed_images) != len(aligned_labels):
+        logging.error("Transformed images and aligned labels length mismatch.")
         return
-
 
     # 5. 학습 및 검증 데이터 분할
     train_images, val_images, train_labels, val_labels = train_test_split(
-        transformed_images, augmented_labels, test_size=0.2, random_state=42, stratify=augmented_labels
+        transformed_images, aligned_labels, test_size=0.2, random_state=42, stratify=aligned_labels
     )
     logging.info(f"Train samples: {len(train_images)}, Validation samples: {len(val_images)}")
 
@@ -561,50 +539,30 @@ def main():
         logging.error("class_weights_tensor에 NaN 또는 INF 값이 포함되어 있습니다.")
         return
 
-    # 7. Dataset 및 DataLoader 설정
-    train_dataset = ECGImageDataset(train_images, train_labels)
-    val_dataset = ECGImageDataset(val_images, val_labels)
+    # 7. 원시 신호 준비 (원시 신호는 aligned_signals)
+    # aligned_signals는 list of numpy arrays with shape (300,)
+    # raw_signals는 list of numpy arrays with shape (1, 300)
+    raw_signals = [signal.reshape(1, -1) for signal in normalized_signals]
+    # Split train and val raw_signals accordingly
+    train_raw_signals = [raw_signals[i] for i in train_labels]
+    val_raw_signals = [raw_signals[i] for i in val_labels]
 
-    # 학습 및 검증 데이터 분할
-    # train_data, val_data, train_labels, val_labels = train_test_split(
-    #     data, labels, test_size=0.2, random_state=42, stratify=labels
-    # )
-    #
-    # # 클래스 가중치 계산
-    # class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
-    # class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    #
-    # if torch.isnan(class_weights_tensor).any() or torch.isinf(class_weights_tensor).any():
-    #     logging.error("class_weights_tensor에 NaN 또는 INF 값이 포함되어 있습니다.")
-    #     return
-    #
-    # # Dataset 및 DataLoader 설정
-    # train_dataset = ECGDataset(train_data, train_labels, augment=True)
-    # val_dataset = ECGDataset(val_data, val_labels, augment=False)
+    # 8. Dataset 및 DataLoader 설정
+    train_dataset = ECGCombinedDataset(train_images, train_raw_signals, train_labels, augment=False)
+    val_dataset = ECGCombinedDataset(val_images, val_raw_signals, val_labels, augment=False)
 
-    # train_loader = DataLoader(
-    #     train_dataset,
-    #     batch_size=BATCH_SIZE,
-    #     shuffle=True,
-    #     collate_fn=collate_fn,
-    #     num_workers=0,  # 멀티프로세싱 활용 (Windows에서는 num_workers=0을 권장할 수 있음)
-    #     pin_memory=True
-    # )
-    #
-    # val_loader = DataLoader(
-    #     val_dataset,
-    #     batch_size=BATCH_SIZE,
-    #     shuffle=False,
-    #     collate_fn=collate_fn,
-    #     num_workers=0,
-    #     pin_memory=True
-    # )
+    # 클래스 불균형을 해결하기 위한 WeightedRandomSampler 사용
+    class_counts = np.bincount(train_labels)
+    class_weights_sampler = 1. / class_counts
+    sample_weights = class_weights_sampler[train_labels]
+    sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
 
     num_workers = 0  # Unix 환경에서는 4 이상으로 설정 가능
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        sampler=sampler,
+        shuffle=False,  # WeightedRandomSampler 사용 시 shuffle=False
         collate_fn=None,  # 기본 collate_fn 사용
         num_workers=num_workers,
         pin_memory=True
@@ -619,7 +577,7 @@ def main():
         pin_memory=True
     )
 
-    # 모델, 손실 함수, 옵티마이저, 스케줄러 설정
+    # 9. 모델, 손실 함수, 옵티마이저, 스케줄러 설정
     model = ECGTransformerWithResidual(
         num_classes=num_classes,
         d_model=D_MODEL,
@@ -630,13 +588,18 @@ def main():
 
     initialize_weights(model.fc)
 
-    criterion = LabelSmoothingLoss(smoothing=0.1)#nn.CrossEntropyLoss(weight=class_weights_tensor)
+    # 손실 함수: CrossEntropyLoss에 클래스 가중치 적용
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+    # Label Smoothing 사용 시:
+    # criterion = LabelSmoothingLoss(smoothing=0.1)
 
     # 학습 가능한 파라미터만 옵티마이저에 전달
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE, weight_decay=1e-5)
 
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+    # 스케줄러: ReduceLROnPlateau 사용
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
 
+    # 10. 학습 루프
     best_val_acc = 0.0
     best_model_state = None
     trigger_times = 0
@@ -662,8 +625,8 @@ def main():
             device
         )
 
-        # 스케줄러 업데이트
-        scheduler.step()
+        # 스케줄러 업데이트: 검증 정확도를 기준으로 학습률 조정
+        scheduler.step(val_acc)
 
         # 모델 성능 기록
         if val_acc > best_val_acc:
@@ -701,36 +664,30 @@ def main():
     model.eval()
     with torch.no_grad():
         for batch in val_loader:
-            inputs, labels = batch
-            inputs = inputs.unsqueeze(1)  # (batch_size, 1, ...)
-
-            # attention_mask를 2D로 확장 (batch_size, seq_length)
-            attention_mask = torch.ones(inputs.size(0), inputs.size(1), dtype=torch.bool).to(device)
-
-            # 텐서들 장치로 이동
-            inputs = inputs.to(device, non_blocking=True)
-            attention_mask = attention_mask.to(device, non_blocking=True)
+            images, raw_signals, labels = batch
+            images = images.to(device, non_blocking=True)
+            raw_signals = raw_signals.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
             # 모델의 출력 계산
-            outputs = model(inputs, attention_mask)
+            attention_mask = torch.ones(images.size(0), images.size(1), dtype=torch.bool).to(device)
+            outputs = model(images, raw_signals, attention_mask)
             _, preds = torch.max(outputs, 1)
 
             # 텐서를 CPU로 이동하여 시각화 준비
-            inputs_np = inputs.cpu().numpy()
-            attention_mask_np = attention_mask.cpu().numpy()
+            images_np = images.cpu().numpy()
             labels_np = labels.cpu().numpy()
             preds_np = preds.cpu().numpy()
 
             # 첫 번째 샘플의 시각화를 위한 처리
             sample_idx = 0
-            sequence_length = int(attention_mask_np[sample_idx].sum())  # 마스크의 유효 길이 계산
+            sequence_length = images_np.shape[1]  # max_length
 
             # 시각화
             plt.figure(figsize=(12, 6))
             for i in range(sequence_length):
                 plt.subplot(4, (sequence_length // 4) + 1, i + 1)
-                plt.imshow(inputs_np[sample_idx, i, 0, :, :], cmap='gray')
+                plt.imshow(images_np[sample_idx, i, 0, :, :], cmap='gray')
                 plt.axis('off')
             plt.suptitle(f"True Label: {labels_np[sample_idx]}, Predicted: {preds_np[sample_idx]}")
             plt.show()

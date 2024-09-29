@@ -440,7 +440,7 @@ def initialize_weights(model):
 def main():
     # 데이터 로딩 및 전처리
     try:
-        ecg_data_A = load_and_preprocess_ecg_data(OFFSET, [2], dtype, DEBUG, CLUSTERING, PLOT)[:1500]
+        ecg_data_A = load_and_preprocess_ecg_data(OFFSET, [2], dtype, DEBUG, CLUSTERING, PLOT)[:100]
     except Exception as e:
         logging.error(f"Data loading error: {e}")
         return
