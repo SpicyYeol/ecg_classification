@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-혼동 행렬 및 분류 보고서 시각화 및 저장 기능이 추가된 ECG 분류 코드 (Transformer 입력 크기 수정 및 WeightNorm 적용)
+혼동 행렬 및 분류 보고서 시각화 및 저장 기능이 추가된 ECG 분류 코드 (Transformer 입력 크기 수정)
 """
 
 import os
@@ -22,7 +22,6 @@ import logging
 import itertools
 import json  # 분류 보고서 저장을 위한 임포트
 
-
 # 로깅 설정
 def setup_logging(log_file):
     logging.basicConfig(
@@ -34,17 +33,15 @@ def setup_logging(log_file):
         ]
     )
 
-
 # 재현성을 위한 시드 설정
 def set_seed(seed):
-    torch.manual_seed(seed)  # CPU
-    torch.cuda.manual_seed(seed)  # GPU
-    torch.cuda.manual_seed_all(seed)  # 모든 GPU
-    np.random.seed(seed)  # Numpy
-    random.seed(seed)  # Python random
-    torch.backends.cudnn.deterministic = True  # 결정론적 결과
-    torch.backends.cudnn.benchmark = False  # 재현성을 위해 benchmark 비활성화
-
+    torch.manual_seed(seed)                   # CPU
+    torch.cuda.manual_seed(seed)              # GPU
+    torch.cuda.manual_seed_all(seed)          # 모든 GPU
+    np.random.seed(seed)                      # Numpy
+    random.seed(seed)                         # Python random
+    torch.backends.cudnn.deterministic = True # 결정론적 결과
+    torch.backends.cudnn.benchmark = False    # 재현성을 위해 benchmark 비활성화
 
 # Stockwell 변환 함수
 def stockwell_transform(signal, fmin, fmax, signal_length):
@@ -53,7 +50,6 @@ def stockwell_transform(signal, fmin, fmax, signal_length):
     fmax_samples = int(fmax / df)
     trans_signal = st.st(signal, fmin_samples, fmax_samples)
     return trans_signal
-
 
 # 파일을 전처리하고 저장하는 함수 (병렬 처리 버전)
 def preprocess_file(args):
@@ -77,7 +73,6 @@ def preprocess_file(args):
     except Exception as e:
         logging.error(f"{file_path} 처리 중 오류 발생: {e}")
 
-
 def preprocess_and_save(file_paths, save_dir, fmin, fmax, signal_length):
     os.makedirs(save_dir, exist_ok=True)
     args_list = [(file_path, save_dir, fmin, fmax, signal_length) for file_path in file_paths]
@@ -86,7 +81,6 @@ def preprocess_and_save(file_paths, save_dir, fmin, fmax, signal_length):
     from tqdm import tqdm  # tqdm 임포트
     with Pool(processes=num_processes) as pool:
         list(tqdm(pool.imap_unordered(preprocess_file, args_list), total=len(args_list)))
-
 
 # 커스텀 데이터셋 클래스
 class CustomECGDataset(Dataset):
@@ -115,7 +109,6 @@ class CustomECGDataset(Dataset):
             label = 0
             return signal_tensor, label
 
-
 # 전처리가 필요한지 확인하는 함수
 def check_preprocessed_data(file_paths, preprocessed_dir):
     preprocessed_files = os.listdir(preprocessed_dir) if os.path.exists(preprocessed_dir) else []
@@ -124,34 +117,72 @@ def check_preprocessed_data(file_paths, preprocessed_dir):
     return len(missing_files) == 0
 
 
+# Positional Encoding 클래스
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+
+        # Create a long enough P matrix
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
+        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
+
+        pe = pe.unsqueeze(0)  # Shape: [1, max_len, d_model]
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor of shape [batch_size, seq_len, d_model]
+        """
+        x = x + self.pe[:, :x.size(1), :]
+        return x
+
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.fc1 = nn.Linear(channel, channel // reduction)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(channel // reduction, channel)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = x.view(b, c, -1).mean(dim=2)  # Global Average Pooling
+        y = self.fc1(y)
+        y = self.relu(y)
+        y = self.fc2(y)
+        y = self.sigmoid(y).view(b, c, 1, 1)
+        return x * y
+
 # 모델 정의
-import torch.nn.utils.weight_norm as weight_norm
-
-
 class TemporalBlock2D(nn.Module):
-    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.2):
+    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.2, use_batchnorm=False, use_se=False):
         super(TemporalBlock2D, self).__init__()
         # "same" 패딩 계산
         pad_height = (kernel_size[0] - 1) * dilation[0] // 2
         pad_width = (kernel_size[1] - 1) * dilation[1] // 2
         padding = (pad_width, pad_width, pad_height, pad_height)  # (좌, 우, 상, 하)
 
-        # 첫 번째 합성곱 층에 WeightNorm 적용
-        self.conv1 = weight_norm(nn.Conv2d(n_inputs, n_outputs, kernel_size, stride=stride,
-                                           padding=0, dilation=dilation))
+        # 첫 번째 합성곱 층
+        self.conv1 = nn.Conv2d(n_inputs, n_outputs, kernel_size, stride=stride,
+                               padding=0, dilation=dilation)
+        self.batchnorm1 = nn.BatchNorm2d(n_outputs) if use_batchnorm else nn.Identity()
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
 
-        # 두 번째 합성곱 층에 WeightNorm 적용
-        self.conv2 = weight_norm(nn.Conv2d(n_outputs, n_outputs, kernel_size, stride=stride,
-                                           padding=0, dilation=dilation))
+        # 두 번째 합성곱 층
+        self.conv2 = nn.Conv2d(n_outputs, n_outputs, kernel_size, stride=stride,
+                               padding=0, dilation=dilation)
+        self.batchnorm2 = nn.BatchNorm2d(n_outputs) if use_batchnorm else nn.Identity()
         self.relu2 = nn.ReLU()
         self.dropout2 = nn.Dropout(dropout)
 
-        # 잔차 연결에 WeightNorm 적용
-        self.downsample = None
-        if n_inputs != n_outputs:
-            self.downsample = weight_norm(nn.Conv2d(n_inputs, n_outputs, kernel_size=1))
+        # 잔차 연결
+        self.downsample = nn.Conv2d(n_inputs, n_outputs, kernel_size=1) if n_inputs != n_outputs else None
         self.relu = nn.ReLU()
 
         # 패딩 레이어
@@ -160,11 +191,13 @@ class TemporalBlock2D(nn.Module):
     def forward(self, x):
         out = self.pad(x)
         out = self.conv1(out)
+        out = self.batchnorm1(out)
         out = self.relu1(out)
         out = self.dropout1(out)
 
         out = self.pad(out)
         out = self.conv2(out)
+        out = self.batchnorm2(out)
         out = self.relu2(out)
         out = self.dropout2(out)
 
@@ -172,10 +205,10 @@ class TemporalBlock2D(nn.Module):
         res = x if self.downsample is None else self.downsample(x)
         return self.relu(out + res)
 
-
 class TemporalConvNet2D(nn.Module):
     def __init__(self, num_inputs, num_channels, kernel_size=(3, 3), dropout=0.2,
-                 num_classes=3, use_transformer=False):
+                 num_classes=3, use_batchnorm=False, use_transformer=False,
+                 transformer_layers=4, transformer_heads=8, max_seq_len=256, use_se=False):
         super(TemporalConvNet2D, self).__init__()
         layers = []
         num_levels = len(num_channels)
@@ -185,7 +218,8 @@ class TemporalConvNet2D(nn.Module):
             in_channels = num_inputs if i == 0 else num_channels[i - 1]
             out_channels = num_channels[i]
             layers += [TemporalBlock2D(in_channels, out_channels, kernel_size,
-                                       stride=1, dilation=dilation_size, dropout=dropout)]
+                                       stride=1, dilation=dilation_size, dropout=dropout,
+                                       use_batchnorm=use_batchnorm, use_se=use_se)]
 
         self.network = nn.Sequential(*layers)
 
@@ -193,9 +227,11 @@ class TemporalConvNet2D(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool2d((16, 16))  # 원하는 크기로 설정
 
         if use_transformer:
+            # self.positional_encoding = PositionalEncoding(d_model=num_channels[-1])
             self.transformer = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(d_model=out_channels, nhead=4, batch_first=True),
-                num_layers=2
+                nn.TransformerEncoderLayer(d_model=num_channels[-1], nhead=transformer_heads, dim_feedforward=2048,
+                                           dropout=dropout, activation='relu'),
+                num_layers=transformer_layers
             )
         else:
             self.transformer = None
@@ -210,6 +246,7 @@ class TemporalConvNet2D(nn.Module):
         if self.transformer is not None:
             b, c, h, w = x.size()
             x = x.view(b, c, h * w).permute(0, 2, 1)  # (batch_size, seq_len, embedding_dim)
+            # x = self.positional_encoding(x)
             x = self.transformer(x)
             x = x.mean(dim=1)  # 시퀀스 차원에 대해 평균
         else:
@@ -218,7 +255,6 @@ class TemporalConvNet2D(nn.Module):
 
         x = self.fc(x)
         return x
-
 
 # 실험 실행 함수
 def run_experiment(config):
@@ -241,7 +277,11 @@ def run_experiment(config):
     fmin = config['fmin']
     fmax = config['fmax']
     signal_length = config['signal_length']
+    target_length = config['target_length']
+    use_batchnorm = config['use_batchnorm']
     use_transformer = config['use_transformer']
+    transformer_layers = config.get('transformer_layers', 4)
+    transformer_heads = config.get('transformer_heads', 8)
     batch_size = config['batch_size']
     accumulation_steps = config['accumulation_steps']
     learning_rate = config['learning_rate']
@@ -250,6 +290,7 @@ def run_experiment(config):
     patience = config['patience']
     root_path = config['root_path']
     preprocessed_dir = config['preprocessed_dir']
+    augment = config.get('augment', False)  # 데이터 증강 여부
 
     # 데이터 로드
     file_dict = {"N": 0, "S": 1, "V": 2}
@@ -261,7 +302,7 @@ def run_experiment(config):
         if not os.path.isdir(folder_path):
             logging.warning(f"폴더 {folder_path} 가 존재하지 않습니다.")
             continue
-        for file in os.listdir(folder_path)[:10000]:
+        for file in os.listdir(folder_path)[:1000]:
             if file.endswith('.csv'):
                 file_paths.append(os.path.join(folder_path, file))
                 labels.append(label)
@@ -293,7 +334,7 @@ def run_experiment(config):
     valid_dataset = CustomECGDataset(valid_data, valid_labels, preprocessed_dir)
     test_dataset = CustomECGDataset(test_data, test_labels, preprocessed_dir)
 
-    num_workers = min(8, cpu_count())  # 시스템에 따라 조정
+    num_workers = 0#min(8, cpu_count())  # 시스템에 따라 조정
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True)
@@ -305,7 +346,11 @@ def run_experiment(config):
     # 디바이스 및 모델 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TemporalConvNet2D(num_inputs=input_size, num_channels=num_channels, kernel_size=kernel_size,
-                              dropout=dropout, num_classes=output_size, use_transformer=use_transformer)
+                              dropout=dropout, num_classes=output_size, use_batchnorm=use_batchnorm,
+                              use_transformer=use_transformer,
+                              transformer_layers=transformer_layers,
+                              transformer_heads=transformer_heads,
+                              use_se=True)
     if torch.cuda.device_count() > 1:
         logging.info(f"{torch.cuda.device_count()}개의 GPU를 사용합니다.")
         model = nn.DataParallel(model)
@@ -329,6 +374,7 @@ def run_experiment(config):
     results = {
         'experiment_name': experiment_name,
         'num_channels': num_channels,
+        'use_batchnorm': use_batchnorm,
         'use_transformer': use_transformer,
         'dropout': dropout,
         'learning_rate': learning_rate,
@@ -490,7 +536,6 @@ def run_experiment(config):
     # 결과를 CSV 파일에 저장
     save_results(results, results_file)
 
-
 # 결과를 CSV 파일에 저장하는 함수
 def save_results(results, results_file):
     # 결과를 데이터프레임으로 변환
@@ -502,19 +547,23 @@ def save_results(results, results_file):
         df_combined = pd.concat([df_existing, df], ignore_index=True)
         df_combined.to_csv(results_file, index=False)
 
-
+# 실험 설정 생성 함수
 # 실험 설정 생성 함수
 def generate_experiment_configs():
     # 하이퍼파라미터 그리드 정의
     num_channels_options = [
-        [16, 32],
+        # [16, 32],
         [32, 64, 128],
-        [64, 128, 256],
-        [32, 64, 128, 256]
+        # [64, 128,  256],
+        # [32, 64, 128, 256]
     ]
-    use_transformer_options = [True, False]
-    dropout_options = [0.1, 0.2, 0.3]
-    learning_rate_options = [0.001, 0.0005, 0.0001]
+    use_batchnorm_options = [True]#, False]
+    use_transformer_options = [True]#, False]
+    dropout_options = [0.1,]#, 0.2, 0.3]
+    learning_rate_options = [0.0005]#[0.0001, 0.0005, 0.001]
+    transformer_layers_options = [4, 6]  # 추가 실험: Transformer 레이어 수
+    transformer_heads_options = [8, 16]  # 추가 실험: Transformer 헤드 수
+    # seed_options 제거됨
 
     # 다른 하이퍼파라미터는 고정값 또는 필요에 따라 추가
     base_config = {
@@ -525,32 +574,37 @@ def generate_experiment_configs():
         'fmin': 0,
         'fmax': 15,
         'signal_length': 10,
-        'batch_size': 16,  # 배치 크기 감소
+        'target_length': 151,  # 고정된 신호 길이
+        'batch_size': 16,       # 배치 크기 감소
         'accumulation_steps': 4,
         'weight_decay': 1e-5,
         'epochs': 50,
         'patience': 5,
-        'root_path': r'F:\homes\icentia_pre',
-        'preprocessed_dir': r'F:\homes\icentia_npy',
-        'seed': 42  # 고정된 시드 값 설정
+        'root_path': r'F:\homes\icentia_pre',      # 실제 데이터 경로로 수정 필요
+        'preprocessed_dir': r'F:\homes\icentia_npy', # 실제 저장 경로로 수정 필요
+        'seed': 42,  # 고정된 시드 값 설정
+        'augment': True  # 데이터 증강 여부
     }
 
     # 하이퍼파라미터 조합 생성
     configs = []
-    for num_channels, use_transformer, dropout, learning_rate in itertools.product(
-            num_channels_options, use_transformer_options,
-            dropout_options, learning_rate_options
+    for num_channels, use_batchnorm, use_transformer, dropout, learning_rate, transformer_layers, transformer_heads in itertools.product(
+        num_channels_options, use_batchnorm_options, use_transformer_options,
+        dropout_options, learning_rate_options, transformer_layers_options, transformer_heads_options
     ):
         config = base_config.copy()
         config['num_channels'] = num_channels
+        config['use_batchnorm'] = use_batchnorm
         config['use_transformer'] = use_transformer
         config['dropout'] = dropout
         config['learning_rate'] = learning_rate
-        config['experiment_name'] = f"exp_nc{len(num_channels)}_tf{use_transformer}_do{dropout}_lr{learning_rate}"
+        config['transformer_layers'] = transformer_layers
+        config['transformer_heads'] = transformer_heads
+        # seed_options 제거로 인해 seed는 base_config에서 가져옵니다.
+        config['experiment_name'] = f"exp_nc{len(num_channels)}_bn{use_batchnorm}_tf{use_transformer}_do{dropout}_lr{learning_rate}_tl{transformer_layers}_th{transformer_heads}"
         configs.append(config)
 
     return configs
-
 
 # 메인 실행 부분
 if __name__ == "__main__":
