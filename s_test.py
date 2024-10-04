@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-혼동 행렬 및 분류 보고서 시각화 및 저장 기능이 추가된 ECG 분류 코드 (Transformer 입력 크기 수정)
+혼동 행렬 및 분류 보고서 시각화 및 저장 기능이 추가된 ECG 분류 코드 (Efficient Transformer, DropBlock, RAdam 및 Ranger 도입)
 """
+
+# Required packages:
+# pip install linformer dropblock ranger-pytorch torch_optimizer tqdm
 
 import os
 import time
@@ -21,6 +24,14 @@ from multiprocessing import Pool, cpu_count
 import logging
 import itertools
 import json  # 분류 보고서 저장을 위한 임포트
+
+# Additional imports for Efficient Transformer, DropBlock, and Optimizers
+from linformer import Linformer  # Efficient Transformer
+from dropblock import DropBlock2D  # DropBlock
+from ranger import Ranger  # Ranger optimizer
+from torch_optimizer import RAdam  # RAdam optimizer
+
+from tqdm import tqdm  # tqdm 임포트
 
 # 로깅 설정
 def setup_logging(log_file):
@@ -78,7 +89,6 @@ def preprocess_and_save(file_paths, save_dir, fmin, fmax, signal_length):
     args_list = [(file_path, save_dir, fmin, fmax, signal_length) for file_path in file_paths]
     num_processes = max(1, cpu_count() - 1)  # 한 개의 CPU 코어는 남겨둠
 
-    from tqdm import tqdm  # tqdm 임포트
     with Pool(processes=num_processes) as pool:
         list(tqdm(pool.imap_unordered(preprocess_file, args_list), total=len(args_list)))
 
@@ -97,7 +107,8 @@ class CustomECGDataset(Dataset):
             # 전처리된 데이터 로드
             original_file = os.path.basename(self.file_paths[idx]).replace('.csv', '_transformed.npy')
             transformed_path = os.path.join(self.transform_dir, original_file)
-            signal_tensor = torch.tensor(np.load(transformed_path), dtype=torch.float32)
+            signal = np.load(transformed_path)
+            signal_tensor = torch.tensor(signal, dtype=torch.float32)
 
             # 레이블
             label = self.labels[idx]
@@ -116,51 +127,30 @@ def check_preprocessed_data(file_paths, preprocessed_dir):
     missing_files = set(expected_files) - set(preprocessed_files)
     return len(missing_files) == 0
 
-
-# Positional Encoding 클래스
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-
-        # Create a long enough P matrix
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-
-        pe[:, 0::2] = torch.sin(position * div_term)  # even indices
-        pe[:, 1::2] = torch.cos(position * div_term)  # odd indices
-
-        pe = pe.unsqueeze(0)  # Shape: [1, max_len, d_model]
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        """
-        Args:
-            x: Tensor of shape [batch_size, seq_len, d_model]
-        """
-        x = x + self.pe[:, :x.size(1), :]
-        return x
-
-class SEBlock(nn.Module):
-    def __init__(self, channel, reduction=16):
-        super(SEBlock, self).__init__()
-        self.fc1 = nn.Linear(channel, channel // reduction)
-        self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Linear(channel // reduction, channel)
-        self.sigmoid = nn.Sigmoid()
+# Efficient Transformer (Linformer) 클래스
+class EfficientTransformer(nn.Module):
+    def __init__(self, d_model, nhead, num_layers, dim_feedforward=2048, dropout=0.1, max_seq_len=256, k=256):
+        super(EfficientTransformer, self).__init__()
+        self.linformer = Linformer(
+            dim=d_model,
+            seq_len=max_seq_len,
+            depth=num_layers,
+            heads=nhead,
+            k=k,
+            one_kv_head=True,
+            share_kv=True,
+            reversible=False,
+            # layer_norm_epsilon=1e-5,
+            dropout=dropout,
+            # attention_dropout=dropout
+        )
 
     def forward(self, x):
-        b, c, _, _ = x.size()
-        y = x.view(b, c, -1).mean(dim=2)  # Global Average Pooling
-        y = self.fc1(y)
-        y = self.relu(y)
-        y = self.fc2(y)
-        y = self.sigmoid(y).view(b, c, 1, 1)
-        return x * y
+        return self.linformer(x)
 
-# 모델 정의
+# DropBlock을 포함한 TemporalBlock2D
 class TemporalBlock2D(nn.Module):
-    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.2, use_batchnorm=False, use_se=False):
+    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, dropout=0.2, use_batchnorm=False, use_dropblock=False, dropblock_size=7):
         super(TemporalBlock2D, self).__init__()
         # "same" 패딩 계산
         pad_height = (kernel_size[0] - 1) * dilation[0] // 2
@@ -171,15 +161,17 @@ class TemporalBlock2D(nn.Module):
         self.conv1 = nn.Conv2d(n_inputs, n_outputs, kernel_size, stride=stride,
                                padding=0, dilation=dilation)
         self.batchnorm1 = nn.BatchNorm2d(n_outputs) if use_batchnorm else nn.Identity()
-        self.relu1 = nn.ReLU()
+        self.relu1 = nn.LeakyReLU(0.1, inplace=True)  # LeakyReLU 사용
         self.dropout1 = nn.Dropout(dropout)
+        self.dropblock1 = DropBlock2D(block_size=dropblock_size, drop_prob=dropout) if use_dropblock else nn.Identity()
 
         # 두 번째 합성곱 층
         self.conv2 = nn.Conv2d(n_outputs, n_outputs, kernel_size, stride=stride,
                                padding=0, dilation=dilation)
         self.batchnorm2 = nn.BatchNorm2d(n_outputs) if use_batchnorm else nn.Identity()
-        self.relu2 = nn.ReLU()
+        self.relu2 = nn.LeakyReLU(0.1, inplace=True)  # LeakyReLU 사용
         self.dropout2 = nn.Dropout(dropout)
+        self.dropblock2 = DropBlock2D(block_size=dropblock_size, drop_prob=dropout) if use_dropblock else nn.Identity()
 
         # 잔차 연결
         self.downsample = nn.Conv2d(n_inputs, n_outputs, kernel_size=1) if n_inputs != n_outputs else None
@@ -194,21 +186,24 @@ class TemporalBlock2D(nn.Module):
         out = self.batchnorm1(out)
         out = self.relu1(out)
         out = self.dropout1(out)
+        out = self.dropblock1(out)
 
         out = self.pad(out)
         out = self.conv2(out)
         out = self.batchnorm2(out)
         out = self.relu2(out)
         out = self.dropout2(out)
+        out = self.dropblock2(out)
 
         # 잔차 연결
         res = x if self.downsample is None else self.downsample(x)
         return self.relu(out + res)
 
+# 모델 정의
 class TemporalConvNet2D(nn.Module):
     def __init__(self, num_inputs, num_channels, kernel_size=(3, 3), dropout=0.2,
                  num_classes=3, use_batchnorm=False, use_transformer=False,
-                 transformer_layers=4, transformer_heads=8, max_seq_len=256, use_se=False):
+                 transformer_layers=4, transformer_heads=8, max_seq_len=256, use_dropblock=False, dropblock_size=7):
         super(TemporalConvNet2D, self).__init__()
         layers = []
         num_levels = len(num_channels)
@@ -219,7 +214,7 @@ class TemporalConvNet2D(nn.Module):
             out_channels = num_channels[i]
             layers += [TemporalBlock2D(in_channels, out_channels, kernel_size,
                                        stride=1, dilation=dilation_size, dropout=dropout,
-                                       use_batchnorm=use_batchnorm, use_se=use_se)]
+                                       use_batchnorm=use_batchnorm, use_dropblock=use_dropblock, dropblock_size=dropblock_size)]
 
         self.network = nn.Sequential(*layers)
 
@@ -227,17 +222,21 @@ class TemporalConvNet2D(nn.Module):
         self.adaptive_pool = nn.AdaptiveAvgPool2d((16, 16))  # 원하는 크기로 설정
 
         if use_transformer:
-            # self.positional_encoding = PositionalEncoding(d_model=num_channels[-1])
-            self.transformer = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(d_model=num_channels[-1], nhead=transformer_heads, dim_feedforward=2048,
-                                           dropout=dropout, activation='relu'),
-                num_layers=transformer_layers
+            # Efficient Transformer 사용
+            self.transformer = EfficientTransformer(
+                d_model=num_channels[-1],
+                nhead=transformer_heads,
+                num_layers=transformer_layers,
+                dim_feedforward=2048,
+                dropout=dropout,
+                max_seq_len=256,
+                k=256  # Linformer specific parameter
             )
         else:
             self.transformer = None
 
         self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(out_channels, num_classes)
+        self.fc = nn.Linear(num_channels[-1], num_classes)  # Use num_channels[-1] as in_channels
 
     def forward(self, x):
         x = self.network(x)
@@ -246,8 +245,7 @@ class TemporalConvNet2D(nn.Module):
         if self.transformer is not None:
             b, c, h, w = x.size()
             x = x.view(b, c, h * w).permute(0, 2, 1)  # (batch_size, seq_len, embedding_dim)
-            # x = self.positional_encoding(x)
-            x = self.transformer(x)
+            x = self.transformer(x)  # Efficient Transformer
             x = x.mean(dim=1)  # 시퀀스 차원에 대해 평균
         else:
             x = self.global_avg_pool(x)
@@ -260,8 +258,9 @@ class TemporalConvNet2D(nn.Module):
 def run_experiment(config):
     # 로그 파일 설정
     experiment_name = config['experiment_name']
+    experiment_dir = os.path.join('results', experiment_name)
+    os.makedirs(experiment_dir, exist_ok=True)
     log_file = os.path.join('logs', f"{experiment_name}.log")
-    os.makedirs('logs', exist_ok=True)
     setup_logging(log_file)
 
     # 시드 설정
@@ -291,6 +290,9 @@ def run_experiment(config):
     root_path = config['root_path']
     preprocessed_dir = config['preprocessed_dir']
     augment = config.get('augment', False)  # 데이터 증강 여부
+    use_dropblock = config.get('use_dropblock', True)  # DropBlock 사용 여부
+    dropblock_size = config.get('dropblock_size', 7)  # DropBlock 크기
+    optimizer_type = config.get('optimizer', 'Ranger')  # 옵티마이저 선택: 'RAdam' 또는 'Ranger'
 
     # 데이터 로드
     file_dict = {"N": 0, "S": 1, "V": 2}
@@ -302,7 +304,7 @@ def run_experiment(config):
         if not os.path.isdir(folder_path):
             logging.warning(f"폴더 {folder_path} 가 존재하지 않습니다.")
             continue
-        for file in os.listdir(folder_path)[:1000]:
+        for file in os.listdir(folder_path)[:15000]:  # Changed to 1000 as per user's last code
             if file.endswith('.csv'):
                 file_paths.append(os.path.join(folder_path, file))
                 labels.append(label)
@@ -334,7 +336,7 @@ def run_experiment(config):
     valid_dataset = CustomECGDataset(valid_data, valid_labels, preprocessed_dir)
     test_dataset = CustomECGDataset(test_data, test_labels, preprocessed_dir)
 
-    num_workers = 0#min(8, cpu_count())  # 시스템에 따라 조정
+    num_workers = min(8, cpu_count())  # 시스템에 따라 조정
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=True)
@@ -345,24 +347,43 @@ def run_experiment(config):
 
     # 디바이스 및 모델 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = TemporalConvNet2D(num_inputs=input_size, num_channels=num_channels, kernel_size=kernel_size,
-                              dropout=dropout, num_classes=output_size, use_batchnorm=use_batchnorm,
-                              use_transformer=use_transformer,
-                              transformer_layers=transformer_layers,
-                              transformer_heads=transformer_heads,
-                              use_se=True)
+    model = TemporalConvNet2D(
+        num_inputs=input_size,
+        num_channels=num_channels,
+        kernel_size=kernel_size,
+        dropout=dropout,
+        num_classes=output_size,
+        use_batchnorm=use_batchnorm,
+        use_transformer=use_transformer,
+        transformer_layers=transformer_layers,
+        transformer_heads=transformer_heads,
+        max_seq_len=256,
+        use_dropblock=use_dropblock,
+        dropblock_size=dropblock_size
+    )
     if torch.cuda.device_count() > 1:
         logging.info(f"{torch.cuda.device_count()}개의 GPU를 사용합니다.")
         model = nn.DataParallel(model)
     model.to(device)
 
     # 혼합 정밀도 훈련을 위한 설정
-    scaler = torch.amp.GradScaler()
+    scaler = torch.cuda.amp.GradScaler()
 
-    # 손실 함수 및 옵티마이저
+    # 손실 함수
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+
+    # 옵티마이저 설정
+    if optimizer_type == 'RAdam':
+        optimizer = RAdam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        logging.info("RAdam 옵티마이저를 사용합니다.")
+    elif optimizer_type == 'Ranger':
+        optimizer = Ranger(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        logging.info("Ranger 옵티마이저를 사용합니다.")
+    else:
+        raise ValueError(f"지원하지 않는 옵티마이저 유형: {optimizer_type}")
+
+    # 학습률 스케줄러: ReduceLROnPlateau 사용
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
 
     # 훈련 파라미터
     best_val_loss = float('inf')
@@ -376,8 +397,14 @@ def run_experiment(config):
         'num_channels': num_channels,
         'use_batchnorm': use_batchnorm,
         'use_transformer': use_transformer,
+        'transformer_layers': transformer_layers,
+        'transformer_heads': transformer_heads,
         'dropout': dropout,
+        'use_dropblock': use_dropblock,
+        'dropblock_size': dropblock_size,
+        'optimizer': optimizer_type,
         'learning_rate': learning_rate,
+        'weight_decay': weight_decay,
         'seed': seed,  # 고정된 시드 값
         'train_loss': [],
         'train_accuracy': [],
@@ -401,7 +428,7 @@ def run_experiment(config):
             inputs = inputs.to(device, non_blocking=True)
             labels_batch = labels_batch.to(device, non_blocking=True)
 
-            with torch.amp.autocast(device_type='cuda'):
+            with torch.cuda.amp.autocast():
                 outputs = model(inputs)
                 loss = criterion(outputs, labels_batch)
                 loss = loss / accumulation_steps  # 그래디언트 누적을 위한 손실 스케일링
@@ -409,6 +436,9 @@ def run_experiment(config):
             scaler.scale(loss).backward()
 
             if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                # Gradient Clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -430,12 +460,14 @@ def run_experiment(config):
         valid_loss = 0.0
         valid_correct = 0
         valid_total = 0
+        all_valid_preds = []
+        all_valid_labels = []
         with torch.no_grad():
             for inputs, labels_batch in valid_loader:
                 inputs = inputs.to(device, non_blocking=True)
                 labels_batch = labels_batch.to(device, non_blocking=True)
 
-                with torch.amp.autocast(device_type='cuda'):
+                with torch.cuda.amp.autocast():
                     outputs = model(inputs)
                     loss = criterion(outputs, labels_batch)
 
@@ -443,6 +475,8 @@ def run_experiment(config):
                 _, preds = torch.max(outputs, 1)
                 valid_total += labels_batch.size(0)
                 valid_correct += (preds == labels_batch).sum().item()
+                all_valid_preds.extend(preds.cpu().numpy())
+                all_valid_labels.extend(labels_batch.cpu().numpy())
 
         valid_accuracy = 100 * valid_correct / valid_total
         logging.info(f"Validation Loss: {valid_loss / valid_total:.4f}, Validation Accuracy: {valid_accuracy:.2f}%")
@@ -450,7 +484,8 @@ def run_experiment(config):
         results['valid_loss'].append(valid_loss / valid_total)
         results['valid_accuracy'].append(valid_accuracy)
 
-        scheduler.step()
+        # 스케줄러 업데이트
+        scheduler.step(valid_loss / valid_total)
 
         # 베스트 모델 저장
         if valid_loss < best_val_loss:
@@ -480,14 +515,14 @@ def run_experiment(config):
     test_loss = 0.0
     test_correct = 0
     test_total = 0
-    all_preds = []
-    all_labels = []
+    all_test_preds = []
+    all_test_labels = []
     with torch.no_grad():
         for inputs, labels_batch in test_loader:
             inputs = inputs.to(device, non_blocking=True)
             labels_batch = labels_batch.to(device, non_blocking=True)
 
-            with torch.amp.autocast(device_type='cuda'):
+            with torch.cuda.amp.autocast():
                 outputs = model(inputs)
                 loss = criterion(outputs, labels_batch)
 
@@ -496,8 +531,8 @@ def run_experiment(config):
             test_total += labels_batch.size(0)
             test_correct += (preds == labels_batch).sum().item()
 
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels_batch.cpu().numpy())
+            all_test_preds.extend(preds.cpu().numpy())
+            all_test_labels.extend(labels_batch.cpu().numpy())
 
     test_accuracy = 100 * test_correct / test_total
     logging.info(f"Test Loss: {test_loss / test_total:.4f}, Test Accuracy: {test_accuracy:.2f}%")
@@ -506,12 +541,11 @@ def run_experiment(config):
 
     # **혼동 행렬 및 분류 보고서 시각화 및 저장 추가**
     # 혼동 행렬 계산
-    cm = confusion_matrix(all_labels, all_preds)
+    cm = confusion_matrix(all_test_labels, all_test_preds)
     cm_display = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=list(file_dict.keys()))
 
     # 혼동 행렬 그림 저장
-    os.makedirs('results', exist_ok=True)
-    cm_figure_file = os.path.join('results', f"{experiment_name}_confusion_matrix.png")
+    cm_figure_file = os.path.join(experiment_dir, f"{experiment_name}_confusion_matrix.png")
     cm_display.plot(cmap=plt.cm.Blues)
     plt.title(f"Confusion Matrix for {experiment_name}")
     plt.savefig(cm_figure_file)
@@ -519,8 +553,8 @@ def run_experiment(config):
     logging.info(f"혼동 행렬이 {cm_figure_file} 에 저장되었습니다.")
 
     # 분류 보고서 계산
-    report = classification_report(all_labels, all_preds, target_names=list(file_dict.keys()), output_dict=True)
-    report_file = os.path.join('results', f"{experiment_name}_classification_report.json")
+    report = classification_report(all_test_labels, all_test_preds, target_names=list(file_dict.keys()), output_dict=True)
+    report_file = os.path.join(experiment_dir, f"{experiment_name}_classification_report.json")
     with open(report_file, 'w') as f:
         json.dump(report, f, indent=4)
     logging.info(f"분류 보고서가 {report_file} 에 저장되었습니다.")
@@ -530,11 +564,8 @@ def run_experiment(config):
     results['classification_report_file'] = report_file
 
     # 결과 저장
-    results_file = os.path.join('results', 'experiment_results.csv')
-    os.makedirs('results', exist_ok=True)
-
     # 결과를 CSV 파일에 저장
-    save_results(results, results_file)
+    save_results(results, os.path.join(experiment_dir, 'experiment_results.csv'))
 
 # 결과를 CSV 파일에 저장하는 함수
 def save_results(results, results_file):
@@ -548,22 +579,29 @@ def save_results(results, results_file):
         df_combined.to_csv(results_file, index=False)
 
 # 실험 설정 생성 함수
-# 실험 설정 생성 함수
 def generate_experiment_configs():
     # 하이퍼파라미터 그리드 정의
     num_channels_options = [
-        # [16, 32],
         [32, 64, 128],
+        [64, 64, 128],
+        # [16, 32],
         # [64, 128,  256],
         # [32, 64, 128, 256]
     ]
-    use_batchnorm_options = [True]#, False]
-    use_transformer_options = [True]#, False]
-    dropout_options = [0.1,]#, 0.2, 0.3]
-    learning_rate_options = [0.0005]#[0.0001, 0.0005, 0.001]
+    use_batchnorm_options = [True]  # , False]
+    use_transformer_options = [True]  # , False]
+    dropout_options = [0.1]  # , 0.2, 0.3]
+    learning_rate_options = [0.0005]  # [0.0001, 0.0005, 0.001]
     transformer_layers_options = [4, 6]  # 추가 실험: Transformer 레이어 수
     transformer_heads_options = [8, 16]  # 추가 실험: Transformer 헤드 수
     # seed_options 제거됨
+
+    # DropBlock options
+    use_dropblock_options = [True, False]
+    dropblock_size_options = [7]  # [5, 7]
+
+    # Optimizer options
+    optimizer_options = ['RAdam', 'Ranger']  # 'RAdam' 또는 'Ranger'
 
     # 다른 하이퍼파라미터는 고정값 또는 필요에 따라 추가
     base_config = {
@@ -579,18 +617,21 @@ def generate_experiment_configs():
         'accumulation_steps': 4,
         'weight_decay': 1e-5,
         'epochs': 50,
-        'patience': 5,
+        'patience': 8,
         'root_path': r'F:\homes\icentia_pre',      # 실제 데이터 경로로 수정 필요
         'preprocessed_dir': r'F:\homes\icentia_npy', # 실제 저장 경로로 수정 필요
         'seed': 42,  # 고정된 시드 값 설정
-        'augment': True  # 데이터 증강 여부
+        'augment': False,  # 데이터 증강 여부 (비활성화 as per earlier)
+        'use_dropblock': True,  # DropBlock 사용 여부
+        'dropblock_size': 7  # DropBlock 크기
     }
 
     # 하이퍼파라미터 조합 생성
     configs = []
-    for num_channels, use_batchnorm, use_transformer, dropout, learning_rate, transformer_layers, transformer_heads in itertools.product(
+    for num_channels, use_batchnorm, use_transformer, dropout, learning_rate, transformer_layers, transformer_heads, use_dropblock, dropblock_size, optimizer in itertools.product(
         num_channels_options, use_batchnorm_options, use_transformer_options,
-        dropout_options, learning_rate_options, transformer_layers_options, transformer_heads_options
+        dropout_options, learning_rate_options, transformer_layers_options, transformer_heads_options,
+        use_dropblock_options, dropblock_size_options, optimizer_options
     ):
         config = base_config.copy()
         config['num_channels'] = num_channels
@@ -600,8 +641,11 @@ def generate_experiment_configs():
         config['learning_rate'] = learning_rate
         config['transformer_layers'] = transformer_layers
         config['transformer_heads'] = transformer_heads
+        config['use_dropblock'] = use_dropblock
+        config['dropblock_size'] = dropblock_size
+        config['optimizer'] = optimizer
         # seed_options 제거로 인해 seed는 base_config에서 가져옵니다.
-        config['experiment_name'] = f"exp_nc{len(num_channels)}_bn{use_batchnorm}_tf{use_transformer}_do{dropout}_lr{learning_rate}_tl{transformer_layers}_th{transformer_heads}"
+        config['experiment_name'] = f"exp_nc{len(num_channels)}_bn{use_batchnorm}_tf{use_transformer}_do{dropout}_lr{learning_rate}_tl{transformer_layers}_th{transformer_heads}_db{dropblock_size}_opt{optimizer}"
         configs.append(config)
 
     return configs
