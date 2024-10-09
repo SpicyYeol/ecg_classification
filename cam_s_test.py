@@ -242,7 +242,7 @@ class TemporalConvNet2D(nn.Module):
 # Hook 함수 정의
 def generate_cam_and_visualize(model, data_tensor):
     activation = {}
-    labe l =["N" ,"S" ,"V" ,"Q" ,"F"]
+    label =["N" ,"S" ,"V" ,"Q" ,"F"]
     # Conv 레이어에 Hook 설정
     def hook_fn(module, input, output):
         activation['conv_output'] = output.detach()
@@ -269,14 +269,14 @@ def generate_cam_and_visualize(model, data_tensor):
         cam += weight_softmax[pred_class, i] * conv_output[i]  # 가중치를 곱해서 더함
 
     # CAM을 정규화
-    data_tenso r =data_tensor.squeeze()
+    data_tensor =data_tensor.squeeze()
     t = np.linspace(0, 10, 1000)
-    exten t =(t[0] ,t[-1] ,0 ,15)
+    extent =(t[0] ,t[-1] ,0 ,15)
     cam = (cam - cam.min()) / (cam.max() - cam.min())  # 정규화
     real_part = data_tensor[0].cpu().numpy()
     imag_part = data_tensor[1].cpu().numpy()
 
-    abs_val = np.sqrt(real_par t* *2 + imag_par t* *2)
+    abs_val = np.sqrt(real_part**2 + imag_part**2)
 
     # plt.imshow(abs_val, origin='lower', extent=extent)
     # plt.show()
@@ -287,7 +287,7 @@ def generate_cam_and_visualize(model, data_tensor):
     plt.figure(figsize=(12, 6))
     extent = (0, abs_val.shape[1], 0, abs_val.shape[0])
 
-    cam_im g =abs_va l *cam
+    cam_img =abs_val *cam
     plt.imshow(cam_img, aspect='auto', origin='lower', cmap='jet', alpha=0.5, extent=extent)
     plt.title('MIT-BIH Data Label:  ' +label[pred_class ] +" CAM")
 
@@ -366,9 +366,9 @@ def run_experiment(config):
         use_dropblock=use_dropblock,
         dropblock_size=dropblock_size
     )
-    mode l =model.to(device)
+    model =model.to(device)
 
-    pth_file_pat h ="./models/exp_nc3_bnTrue_tfTrue_do0.1_lr0.0005_tl6_th16_db7_optRAdam_best.pth"
+    pth_file_path ="./models/exp_nc3_bnTrue_tfTrue_do0.1_lr0.0005_tl6_th16_db7_optRAdam_best.pth"
     checkpoint = torch.load(pth_file_path)  # 전체 체크포인트 로드
     model.load_state_dict(checkpoint['model_state_dict'])  # 모델 파라미터만 로드
     model.eval()
@@ -449,8 +449,7 @@ def generate_experiment_configs():
         config['dropblock_size'] = dropblock_size
         config['optimizer'] = optimizer
         # seed_options 제거로 인해 seed는 base_config에서 가져옵니다.
-        config
-            ['experiment_name'] = f"exp_nc{len(num_channels)}_bn{use_batchnorm}_tf{use_transformer}_do{dropout}_lr{learning_rate}_tl{transformer_layers}_th{transformer_heads}_db{dropblock_size}_opt{optimizer}"
+        config['experiment_name'] = f"exp_nc{len(num_channels)}_bn{use_batchnorm}_tf{use_transformer}_do{dropout}_lr{learning_rate}_tl{transformer_layers}_th{transformer_heads}_db{dropblock_size}_opt{optimizer}"
         configs.append(config)
 
     return configs
